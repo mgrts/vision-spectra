@@ -1,0 +1,2 @@
+# This file ensures the runs directory is tracked by git
+# Training outputs will be stored here - they will be ignored by git

@@ -1,0 +1,2 @@
+# This file ensures the mlruns directory is tracked by git
+# MLflow tracking data will be stored here - they will be ignored by git

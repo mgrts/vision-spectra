@@ -1,0 +1,2 @@
+# This file ensures the data directory is tracked by git
+# Add downloaded datasets here - they will be ignored by git

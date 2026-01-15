@@ -1,0 +1,93 @@
+# Example configuration for vision spectra experiments
+
+# Experiment metadata
+name: "example_experiment"
+seed: 42
+device: "auto"  # auto, cpu, cuda, mps
+
+# Dataset configuration
+dataset:
+  name: "pathmnist"  # pathmnist, pneumoniamnist, bloodmnist, dermamnist, octmnist, organamnist, synthetic
+  image_size: 28
+  batch_size: 64
+  num_workers: 4
+  pin_memory: true
+  # Synthetic dataset options (only used if name=synthetic)
+  num_classes: 5
+  num_samples_train: 5000
+  num_samples_val: 1000
+  num_samples_test: 1000
+
+# Model configuration
+model:
+  name: "vit_tiny_patch16_224"  # timm model name
+  pretrained: false
+  drop_rate: 0.0
+  attn_drop_rate: 0.0
+  drop_path_rate: 0.1
+  # MIM specific
+  mask_ratio: 0.75
+  decoder_embed_dim: 128
+  decoder_depth: 2
+  decoder_num_heads: 4
+
+# Loss configuration
+loss:
+  # Classification loss
+  classification: "cross_entropy"  # cross_entropy, focal, label_smoothing, class_balanced, asymmetric
+  label_smoothing: 0.1
+  focal_gamma: 2.0
+  focal_alpha:
+  class_balanced_beta: 0.9999
+  # MIM loss
+  mim: "mse"  # mse, l1, smooth_l1
+  mim_norm_pix: true
+  # MTL weights
+  mtl_cls_weight: 1.0
+  mtl_mim_weight: 0.5
+
+# Optimizer configuration
+optimizer:
+  name: "adamw"  # adam, adamw, sgd
+  learning_rate: 0.0001
+  weight_decay: 0.05
+  momentum: 0.9
+  betas: [0.9, 0.999]
+  # Scheduler
+  scheduler: "cosine"  # cosine, step, plateau, none
+  warmup_epochs: 5
+  min_lr: 0.000001
+
+# Training configuration
+training:
+  epochs: 100
+  gradient_clip: 1.0
+  mixed_precision: true
+  # Checkpointing
+  save_every_n_epochs: 10
+  keep_top_k: 3
+  # Early stopping
+  early_stopping: true
+  patience: 15
+  # Debug
+  smoke_test: false
+
+# Spectral metrics configuration
+spectral:
+  enabled: true
+  log_every_n_epochs: 5
+  log_every_n_steps:
+  # Layers to analyze (regex patterns)
+  layers:
+  - "blocks.0"
+  - "blocks.2"
+  - "blocks.4"
+  - "blocks.6"
+  # What to extract
+  extract_qkv: true
+  extract_mlp: false
+  extract_patch_embed: true
+
+# Paths
+output_dir: "runs"
+data_dir: "data"

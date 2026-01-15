@@ -1,0 +1,99 @@
+[tool.poetry]
+name = "vision-spectra"
+version = "0.1.0"
+description = "Studying how loss functions affect transformer weight spectra in vision tasks"
+authors = ["Mikhail Gritskikh"]
+readme = "README.md"
+license = "MIT"
+packages = [{include = "vision_spectra", from = "src"}]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+torch = ">=2.6.0"
+torchvision = ">=0.21.0"
+timm = "^1.0"
+torchmetrics = "^1.6"
+numpy = ">=1.26.0,<3.0"
+pandas = "^2.0"
+scipy = "^1.10"
+scikit-learn = "^1.0"
+matplotlib = "^3.7"
+seaborn = "^0.13"
+mlflow = ">=2.20,<3.0"
+typer = {extras = ["all"], version = "^0.15"}
+loguru = "^0.7"
+tqdm = "^4.65"
+pydantic = "^2.0"
+pydantic-settings = "^2.0"
+pyyaml = "^6.0"
+pillow = ">=10.3.0"
+medmnist = "^3.0"
+einops = "^0.8"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.0"
+pytest-cov = "^5.0"
+ruff = "^0.5"
+mypy = "^1.10"
+pre-commit = "^4.0"
+bandit = {extras = ["toml"], version = "^1.7"}
+
+[tool.poetry.scripts]
+vision-spectra = "vision_spectra.cli:app"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.ruff]
+line-length = 99
+target-version = "py311"
+src = ["src"]
+
+[tool.ruff.lint]
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # pyflakes
+    "I",      # isort
+    "B",      # flake8-bugbear
+    "C4",     # flake8-comprehensions
+    "UP",     # pyupgrade
+    "ARG",    # flake8-unused-arguments
+    "SIM",    # flake8-simplify
+]
+ignore = [
+    "E501",   # line too long (handled by formatter)
+    "B008",   # do not perform function calls in argument defaults
+    "C901",   # too complex
+    "ARG001", # unused function argument
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["vision_spectra"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
+exclude = ["tests"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::UserWarning",
+]
+
+[tool.bandit]
+exclude_dirs = ["tests", ".venv"]
+skips = ["B101", "B110", "B404", "B603"]  # B101: assert, B110: try-except-pass, B404/B603: subprocess (safe in experiments)
