@@ -313,3 +313,130 @@ class TestNumericalStability:
 
         # Should handle large values
         assert "spectral_entropy" in metrics
+
+
+class TestSpectralDistribution:
+    """Tests for spectral distribution extraction."""
+
+    def test_get_spectral_distribution(self):
+        """Test spectral distribution extraction."""
+        from vision_spectra.metrics import get_spectral_distribution
+
+        np.random.seed(42)
+        W = np.random.randn(64, 64)
+        dist = get_spectral_distribution(W, name="test_layer", matrix_type="test")
+
+        assert dist is not None
+        assert dist.name == "test_layer"
+        assert dist.matrix_type == "test"
+        assert len(dist.singular_values) > 0
+        assert len(dist.eigenvalues) == len(dist.singular_values)
+        assert len(dist.normalized_sv) == len(dist.singular_values)
+        assert len(dist.cumulative_variance) == len(dist.singular_values)
+
+        # Singular values should be descending
+        assert np.all(np.diff(dist.singular_values) <= 0)
+
+        # Normalized SV should be <= 1
+        assert np.all(dist.normalized_sv <= 1.0)
+
+        # Cumulative variance should be increasing and end at 1
+        assert np.all(np.diff(dist.cumulative_variance) >= 0)
+        assert np.isclose(dist.cumulative_variance[-1], 1.0, rtol=1e-4)
+
+    def test_invalid_input(self):
+        """Test with invalid input."""
+        from vision_spectra.metrics import get_spectral_distribution
+
+        # 1D array should return None
+        v = np.random.randn(10)
+        assert get_spectral_distribution(v) is None
+
+
+class TestSpectralTracker:
+    """Tests for spectral distribution tracking."""
+
+    def test_tracker_initialization(self):
+        """Test tracker initialization."""
+        from vision_spectra.metrics import SpectralTracker
+
+        tracker = SpectralTracker(
+            layer_patterns=["blocks.0", "blocks.2"],
+            include_qkv=True,
+            include_mlp=False,
+            max_singular_values=50,
+        )
+
+        assert tracker.layer_patterns == ["blocks.0", "blocks.2"]
+        assert tracker.include_qkv is True
+        assert tracker.include_mlp is False
+        assert tracker.max_singular_values == 50
+        assert len(tracker.history) == 0
+
+    def test_tracker_record_epoch(self):
+        """Test recording a training epoch."""
+        from vision_spectra.metrics import SpectralTracker
+        from vision_spectra.models import create_vit_classifier
+        from vision_spectra.settings import ModelConfig
+
+        config = ModelConfig(name="vit_tiny_patch16_224")
+        model = create_vit_classifier(config, num_classes=10, num_channels=3, image_size=32)
+
+        tracker = SpectralTracker(
+            layer_patterns=["blocks.0"],
+            include_qkv=True,
+            include_mlp=False,
+            max_singular_values=50,
+        )
+
+        snapshot = tracker.record_epoch(model, epoch=0)
+
+        assert snapshot.epoch == 0
+        assert len(snapshot.distributions) > 0
+        assert len(snapshot.aggregated_metrics) > 0
+        assert len(tracker.history) == 1
+
+    def test_get_metric_history(self):
+        """Test getting metric history."""
+        from vision_spectra.metrics import SpectralTracker
+        from vision_spectra.models import create_vit_classifier
+        from vision_spectra.settings import ModelConfig
+
+        config = ModelConfig(name="vit_tiny_patch16_224")
+        model = create_vit_classifier(config, num_classes=10, num_channels=3, image_size=32)
+
+        tracker = SpectralTracker(layer_patterns=["blocks.0"])
+
+        # Record multiple epochs
+        for epoch in range(3):
+            tracker.record_epoch(model, epoch=epoch)
+
+        epochs, values = tracker.get_metric_history("stable_rank_mean")
+
+        assert len(epochs) == 3
+        assert len(values) == 3
+        assert epochs == [0, 1, 2]
+
+    def test_save_and_load(self, tmp_path):
+        """Test saving and loading tracker state."""
+        from vision_spectra.metrics import SpectralTracker
+        from vision_spectra.models import create_vit_classifier
+        from vision_spectra.settings import ModelConfig
+
+        config = ModelConfig(name="vit_tiny_patch16_224")
+        model = create_vit_classifier(config, num_classes=10, num_channels=3, image_size=32)
+
+        tracker = SpectralTracker(layer_patterns=["blocks.0"], max_singular_values=20)
+        tracker.record_epoch(model, epoch=0)
+
+        # Save
+        save_path = tmp_path / "spectral_history.json"
+        tracker.save(save_path)
+        assert save_path.exists()
+
+        # Load
+        loaded_tracker = SpectralTracker.load(save_path)
+
+        assert len(loaded_tracker.history) == 1
+        assert loaded_tracker.history[0].epoch == 0
+        assert len(loaded_tracker.history[0].distributions) > 0

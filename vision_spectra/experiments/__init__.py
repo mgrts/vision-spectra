@@ -6,5 +6,6 @@ comparing different loss functions, training regimes, and their
 effects on transformer weight spectra.
 
 Usage:
-    poetry run python src/experiments/run_loss_comparison.py
+    poetry run python -m vision_spectra.experiments.run_loss_comparison
+    poetry run python -m vision_spectra.experiments.run_classification_experiments
 """

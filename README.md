@@ -212,7 +212,7 @@ docker run --rm \
 ## Project Structure
 
 ```text
-vision_spectra/
+vision-spectra/
 ├── pyproject.toml          # Poetry configuration
 ├── poetry.lock             # Locked dependencies
 ├── README.md               # This file
@@ -227,18 +227,16 @@ vision_spectra/
 ├── configs/                # Example configuration files
 │   └── example.yaml
 ├── data/                   # Downloaded datasets (gitignored)
-│   └── .gitkeep
 ├── runs/                   # Training outputs (gitignored)
-│   └── .gitkeep
 ├── mlruns/                 # MLflow tracking (gitignored)
-│   └── .gitkeep
-├── src/
-│   ├── experiments/        # Experiment scripts
-│   │   └── run_loss_comparison.py
-│   └── vision_spectra/     # Main package
+├── vision_spectra/         # Main package
 │   ├── __init__.py
 │   ├── cli.py              # CLI entrypoints
 │   ├── settings.py         # Configuration models
+│   ├── experiments/        # Experiment scripts
+│   │   ├── __init__.py
+│   │   ├── run_classification_experiments.py
+│   │   └── run_loss_comparison.py
 │   ├── data/               # Dataset modules
 │   │   ├── __init__.py
 │   │   ├── base.py         # Dataset abstractions
@@ -268,9 +266,7 @@ vision_spectra/
 │   │   └── multitask.py    # MTL training
 │   └── utils/              # Utilities
 │       ├── __init__.py
-│       ├── reproducibility.py
-│       ├── checkpointing.py
-│       └── logging.py
+│       └── visualization.py
 └── tests/                  # Test suite
     ├── __init__.py
     ├── test_data.py
@@ -281,7 +277,7 @@ vision_spectra/
 
 ## Adding New Loss Functions
 
-1. Implement the loss in `src/vision_spectra/losses/classification.py`:
+1. Implement the loss in `vision_spectra/losses/classification.py`:
 
 ```python
 class MyCustomLoss(nn.Module):
@@ -294,13 +290,13 @@ class MyCustomLoss(nn.Module):
         return loss
 ```
 
-1. Register in `src/vision_spectra/losses/registry.py`:
+1. Register in `vision_spectra/losses/registry.py`:
 
 ```python
 LOSS_REGISTRY["my_custom"] = MyCustomLoss
 ```
 
-1. Add configuration in `src/vision_spectra/settings.py` if needed.
+1. Add configuration in `vision_spectra/settings.py` if needed.
 
 ## Spectral Metrics
 

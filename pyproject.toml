@@ -5,7 +5,7 @@ description = "Studying how loss functions affect transformer weight spectra in 
 authors = ["Mikhail Gritskikh"]
 readme = "README.md"
 license = "MIT"
-packages = [{include = "vision_spectra", from = "src"}]
+packages = [{include = "vision_spectra"}]
 
 [tool.poetry.dependencies]
 python = "^3.11"
@@ -48,7 +48,7 @@ build-backend = "poetry.core.masonry.api"
 [tool.ruff]
 line-length = 99
 target-version = "py311"
-src = ["src"]
+src = ["vision_spectra"]
 
 [tool.ruff.lint]
 select = [

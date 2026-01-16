@@ -26,7 +26,11 @@ from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau, StepL
 from torch.utils.data import DataLoader
 
 from vision_spectra.metrics.extraction import extract_all_weights
-from vision_spectra.metrics.spectral import aggregate_spectral_metrics, get_spectral_metrics
+from vision_spectra.metrics.spectral import (
+    SpectralTracker,
+    aggregate_spectral_metrics,
+    get_spectral_metrics,
+)
 from vision_spectra.utils.visualization import save_prediction_examples
 
 if TYPE_CHECKING:
@@ -83,6 +87,17 @@ class BaseTrainer(ABC):
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         self.artifacts_dir = self.run_dir / "artifacts"
         self.artifacts_dir.mkdir(parents=True, exist_ok=True)
+
+        # Spectral distribution tracker
+        self.spectral_tracker: SpectralTracker | None = None
+        if config.spectral.enabled and config.spectral.track_distributions:
+            self.spectral_tracker = SpectralTracker(
+                layer_patterns=config.spectral.layers,
+                include_qkv=config.spectral.extract_qkv,
+                include_mlp=config.spectral.extract_mlp,
+                include_patch_embed=config.spectral.extract_patch_embed,
+                max_singular_values=config.spectral.max_singular_values,
+            )
 
         # Smoke test mode
         if config.training.smoke_test:
@@ -215,6 +230,15 @@ class BaseTrainer(ABC):
                     spectral_metrics = self._compute_spectral_metrics()
                     self._log_metrics(spectral_metrics, prefix="spectral")
 
+                    # Track spectral distributions
+                    if self.spectral_tracker is not None:
+                        self.model.eval()
+                        snapshot = self.spectral_tracker.record_epoch(self.model, epoch)
+                        logger.debug(
+                            f"Recorded spectral snapshot for epoch {epoch} "
+                            f"({len(snapshot.distributions)} layers)"
+                        )
+
                 # Update scheduler
                 if self.scheduler is not None:
                     if isinstance(self.scheduler, ReduceLROnPlateau):
@@ -267,10 +291,40 @@ class BaseTrainer(ABC):
             if best_checkpoint:
                 mlflow.log_artifact(str(best_checkpoint))
 
+            # Save spectral distribution history and plots
+            if (
+                self.spectral_tracker is not None
+                and self.config.spectral.save_distribution_history
+                and self.spectral_tracker.history
+            ):
+                # Save JSON history
+                spectral_history_path = self.artifacts_dir / "spectral_history.json"
+                self.spectral_tracker.save(spectral_history_path)
+                mlflow.log_artifact(str(spectral_history_path))
+                logger.info(f"Saved spectral distribution history: {spectral_history_path}")
+
+                # Save spectral distribution plots
+                from vision_spectra.utils.visualization import (
+                    save_spectral_distribution_plots,
+                )
+
+                try:
+                    plot_paths = save_spectral_distribution_plots(
+                        self.spectral_tracker,
+                        self.artifacts_dir,
+                        prefix="",
+                    )
+                    for plot_path in plot_paths:
+                        mlflow.log_artifact(str(plot_path))
+                    logger.info(f"Saved {len(plot_paths)} spectral distribution plots")
+                except Exception as e:
+                    logger.warning(f"Failed to save spectral plots: {e}")
+
             return {
                 "best_val_metric": self.best_val_metric,
                 "best_checkpoint": best_checkpoint,
                 "final_epoch": self.current_epoch,
+                "spectral_tracker": self.spectral_tracker,
             }
 
     def _should_log_spectral(self, epoch: int) -> bool:
@@ -392,3 +446,58 @@ class BaseTrainer(ABC):
             self.scheduler.load_state_dict(state["scheduler_state_dict"])
 
         logger.info(f"Loaded checkpoint from {path} (epoch {self.current_epoch})")
+
+    def cleanup(self) -> None:
+        """
+        Clean up resources to free memory.
+
+        This should be called after training is complete, especially when
+        running multiple experiments in sequence. It moves the model to CPU,
+        clears CUDA cache, and removes references to large objects.
+        """
+        import gc
+
+        # Move model to CPU to free GPU memory
+        if hasattr(self, "model") and self.model is not None:
+            self.model.cpu()
+            del self.model
+            self.model = None
+
+        # Clear optimizer state (can hold GPU tensors)
+        if hasattr(self, "optimizer") and self.optimizer is not None:
+            del self.optimizer
+            self.optimizer = None
+
+        # Clear scheduler
+        if hasattr(self, "scheduler") and self.scheduler is not None:
+            del self.scheduler
+            self.scheduler = None
+
+        # Clear GradScaler
+        if hasattr(self, "scaler") and self.scaler is not None:
+            del self.scaler
+            self.scaler = None
+
+        # Clear spectral tracker (can hold numpy arrays)
+        if hasattr(self, "spectral_tracker") and self.spectral_tracker is not None:
+            self.spectral_tracker.history.clear()
+            del self.spectral_tracker
+            self.spectral_tracker = None
+
+        # Clear data loader references
+        if hasattr(self, "train_loader"):
+            del self.train_loader
+            self.train_loader = None
+        if hasattr(self, "val_loader"):
+            del self.val_loader
+            self.val_loader = None
+
+        # Force garbage collection
+        gc.collect()
+
+        # Clear CUDA cache if available
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+
+        logger.debug("Trainer resources cleaned up")

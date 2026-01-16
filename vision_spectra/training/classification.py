@@ -184,3 +184,22 @@ class ClassificationTrainer(BaseTrainer):
         """For classification, higher accuracy is better."""
         # We track val loss, so lower is still better
         return val_metric < self.best_val_metric
+
+    def cleanup(self) -> None:
+        """Clean up resources including classification-specific objects."""
+        # Clean up criterion
+        if hasattr(self, "criterion") and self.criterion is not None:
+            self.criterion.cpu()
+            del self.criterion
+            self.criterion = None
+
+        # Clean up torchmetrics objects
+        for attr in ["train_accuracy", "val_accuracy", "val_f1", "val_auroc"]:
+            if hasattr(self, attr):
+                metric = getattr(self, attr)
+                if metric is not None:
+                    metric.cpu()
+                    delattr(self, attr)
+
+        # Call parent cleanup
+        super().cleanup()

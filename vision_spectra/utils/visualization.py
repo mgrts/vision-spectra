@@ -503,3 +503,352 @@ def _create_masked_image(
                 masked_img[:, y_start:y_end, x_start:x_end] = gray_value
 
     return masked_img
+
+
+# =============================================================================
+# Spectral Distribution Visualization
+# =============================================================================
+
+
+def plot_singular_value_distribution(
+    singular_values: np.ndarray,
+    title: str = "Singular Value Distribution",
+    save_path: Path | None = None,
+    log_scale: bool = True,
+    show_cumulative: bool = True,
+) -> plt.Figure:
+    """
+    Plot singular value distribution with optional cumulative variance.
+
+    Args:
+        singular_values: Array of singular values (descending order)
+        title: Plot title
+        save_path: Path to save the figure (optional)
+        log_scale: Whether to use log scale for y-axis
+        show_cumulative: Whether to show cumulative variance explained
+
+    Returns:
+        Matplotlib Figure object
+    """
+    fig, ax1 = plt.subplots(figsize=(10, 6))
+    ax2 = None  # Initialize for type checker
+
+    ranks = np.arange(1, len(singular_values) + 1)
+
+    # Plot singular values
+    ax1.plot(ranks, singular_values, "b-", linewidth=2, label="Singular Values")
+    ax1.set_xlabel("Rank", fontsize=12)
+    ax1.set_ylabel("Singular Value", color="b", fontsize=12)
+    ax1.tick_params(axis="y", labelcolor="b")
+
+    if log_scale and np.all(singular_values > 0):
+        ax1.set_yscale("log")
+        ax1.set_xscale("log")
+
+    # Plot cumulative variance on secondary axis
+    if show_cumulative:
+        eigenvalues = singular_values**2
+        total_var = eigenvalues.sum()
+        if total_var > 0:
+            cumulative_var = np.cumsum(eigenvalues) / total_var
+
+            ax2 = ax1.twinx()
+            ax2.plot(ranks, cumulative_var, "r--", linewidth=2, label="Cumulative Variance")
+            ax2.set_ylabel("Cumulative Variance Explained", color="r", fontsize=12)
+            ax2.tick_params(axis="y", labelcolor="r")
+            ax2.set_ylim(0, 1.05)
+
+            # Add 90% and 95% lines
+            ax2.axhline(y=0.9, color="gray", linestyle=":", alpha=0.5)
+            ax2.axhline(y=0.95, color="gray", linestyle=":", alpha=0.5)
+
+    ax1.set_title(title, fontsize=14, fontweight="bold")
+    ax1.grid(True, alpha=0.3)
+
+    # Add legend
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    if show_cumulative and ax2 is not None:
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        ax1.legend(lines1 + lines2, labels1 + labels2, loc="center right")
+    else:
+        ax1.legend(loc="upper right")
+
+    plt.tight_layout()
+
+    if save_path:
+        save_path = Path(save_path)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+
+    return fig
+
+
+def plot_spectral_metrics_history(
+    epochs: list[int],
+    metrics_history: dict[str, list[float]],
+    title: str = "Spectral Metrics Evolution",
+    save_path: Path | None = None,
+) -> plt.Figure:
+    """
+    Plot spectral metrics evolution over training epochs.
+
+    Args:
+        epochs: List of epoch numbers
+        metrics_history: Dictionary mapping metric names to value lists
+        title: Plot title
+        save_path: Path to save the figure (optional)
+
+    Returns:
+        Matplotlib Figure object
+    """
+    n_metrics = len(metrics_history)
+    if n_metrics == 0:
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.text(0.5, 0.5, "No metrics to display", ha="center", va="center")
+        return fig
+
+    # Create subplots
+    ncols = min(2, n_metrics)
+    nrows = (n_metrics + ncols - 1) // ncols
+    fig, axes = plt.subplots(nrows, ncols, figsize=(6 * ncols, 4 * nrows))
+
+    if n_metrics == 1:
+        axes = np.array([axes])
+    axes = axes.flatten() if hasattr(axes, "flatten") else [axes]
+
+    for idx, (metric_name, values) in enumerate(metrics_history.items()):
+        if idx >= len(axes):
+            break
+        ax = axes[idx]
+        ax.plot(epochs, values, "o-", linewidth=2, markersize=4)
+        ax.set_xlabel("Epoch", fontsize=11)
+        ax.set_ylabel(metric_name.replace("_", " ").title(), fontsize=11)
+        ax.set_title(metric_name.replace("_", " ").title(), fontsize=12)
+        ax.grid(True, alpha=0.3)
+
+    # Hide unused subplots
+    for idx in range(len(metrics_history), len(axes)):
+        axes[idx].set_visible(False)
+
+    fig.suptitle(title, fontsize=14, fontweight="bold")
+    plt.tight_layout()
+
+    if save_path:
+        save_path = Path(save_path)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+
+    return fig
+
+
+def plot_layer_sv_comparison(
+    layer_distributions: dict[str, np.ndarray],
+    title: str = "Singular Value Comparison Across Layers",
+    save_path: Path | None = None,
+    max_rank: int = 50,
+) -> plt.Figure:
+    """
+    Plot singular value distributions for multiple layers on the same plot.
+
+    Args:
+        layer_distributions: Dictionary mapping layer names to singular value arrays
+        title: Plot title
+        save_path: Path to save the figure (optional)
+        max_rank: Maximum rank to display
+
+    Returns:
+        Matplotlib Figure object
+    """
+    fig, ax = plt.subplots(figsize=(12, 6))
+
+    colors = plt.cm.viridis(np.linspace(0, 1, len(layer_distributions)))
+
+    for idx, (layer_name, sv) in enumerate(layer_distributions.items()):
+        sv_truncated = sv[:max_rank]
+        ranks = np.arange(1, len(sv_truncated) + 1)
+        # Shorten layer name for legend
+        short_name = layer_name.split(".")[-2] + "." + layer_name.split(".")[-1]
+        ax.plot(ranks, sv_truncated, "-", color=colors[idx], linewidth=2, label=short_name)
+
+    ax.set_xlabel("Rank", fontsize=12)
+    ax.set_ylabel("Singular Value", fontsize=12)
+    ax.set_title(title, fontsize=14, fontweight="bold")
+    ax.set_yscale("log")
+    ax.set_xscale("log")
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="upper right", fontsize=9)
+
+    plt.tight_layout()
+
+    if save_path:
+        save_path = Path(save_path)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+
+    return fig
+
+
+def plot_sv_evolution_heatmap(
+    epochs: list[int],
+    sv_history: list[np.ndarray],
+    title: str = "Singular Value Evolution",
+    save_path: Path | None = None,
+    max_rank: int = 50,
+) -> plt.Figure:
+    """
+    Plot singular value evolution as a heatmap over epochs.
+
+    Args:
+        epochs: List of epoch numbers
+        sv_history: List of singular value arrays (one per epoch)
+        title: Plot title
+        save_path: Path to save the figure (optional)
+        max_rank: Maximum rank to display
+
+    Returns:
+        Matplotlib Figure object
+    """
+    if not sv_history:
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.text(0.5, 0.5, "No data to display", ha="center", va="center")
+        return fig
+
+    # Build 2D array [epochs x ranks]
+    max_len = min(max_rank, max(len(sv) for sv in sv_history))
+    data = np.zeros((len(epochs), max_len))
+
+    for i, sv in enumerate(sv_history):
+        length = min(len(sv), max_len)
+        data[i, :length] = sv[:length]
+
+    # Normalize to log scale for better visualization
+    data_log = np.log10(data + 1e-10)
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+
+    im = ax.imshow(
+        data_log,
+        aspect="auto",
+        cmap="viridis",
+        origin="lower",
+        extent=[1, max_len, epochs[0], epochs[-1]],
+    )
+
+    ax.set_xlabel("Singular Value Rank", fontsize=12)
+    ax.set_ylabel("Epoch", fontsize=12)
+    ax.set_title(title, fontsize=14, fontweight="bold")
+
+    cbar = plt.colorbar(im, ax=ax)
+    cbar.set_label("log₁₀(Singular Value)", fontsize=11)
+
+    plt.tight_layout()
+
+    if save_path:
+        save_path = Path(save_path)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+
+    return fig
+
+
+def save_spectral_distribution_plots(
+    tracker: SpectralTracker,
+    save_dir: Path,
+    prefix: str = "",
+) -> list[Path]:
+    """
+    Save all spectral distribution plots from a SpectralTracker.
+
+    Args:
+        tracker: SpectralTracker with recorded history
+        save_dir: Directory to save plots
+        prefix: Optional prefix for filenames
+
+    Returns:
+        List of saved file paths
+    """
+
+    save_dir = Path(save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+    saved_paths = []
+
+    if not tracker.history:
+        return saved_paths
+
+    prefix = f"{prefix}_" if prefix else ""
+
+    # 1. Plot metrics evolution
+    metrics_to_plot = [
+        "spectral_entropy_mean",
+        "stable_rank_mean",
+        "alpha_exponent_mean",
+        "pl_alpha_hill_mean",
+    ]
+
+    metrics_history = {}
+    epochs = []
+    for snapshot in tracker.history:
+        epochs.append(snapshot.epoch)
+        for metric in metrics_to_plot:
+            if metric not in metrics_history:
+                metrics_history[metric] = []
+            value = snapshot.aggregated_metrics.get(metric, np.nan)
+            metrics_history[metric].append(value)
+
+    # Remove metrics with all NaN
+    metrics_history = {k: v for k, v in metrics_history.items() if not all(np.isnan(v))}
+
+    if metrics_history:
+        path = save_dir / f"{prefix}spectral_metrics_evolution.png"
+        plot_spectral_metrics_history(epochs, metrics_history, save_path=path)
+        plt.close()
+        saved_paths.append(path)
+
+    # 2. Plot layer comparison for last epoch
+    if tracker.history:
+        last_snapshot = tracker.history[-1]
+        layer_dists = {d.name: d.singular_values for d in last_snapshot.distributions}
+
+        if layer_dists:
+            path = save_dir / f"{prefix}layer_sv_comparison_epoch{last_snapshot.epoch}.png"
+            plot_layer_sv_comparison(layer_dists, save_path=path)
+            plt.close()
+            saved_paths.append(path)
+
+    # 3. Plot SV evolution heatmap for first layer
+    layer_names = tracker.get_all_layer_names()
+    if layer_names:
+        first_layer = layer_names[0]
+        sv_epochs, sv_history = tracker.get_layer_sv_history(first_layer)
+
+        if sv_history:
+            path = save_dir / f"{prefix}sv_evolution_{first_layer.replace('.', '_')}.png"
+            plot_sv_evolution_heatmap(
+                sv_epochs,
+                sv_history,
+                title=f"SV Evolution: {first_layer}",
+                save_path=path,
+            )
+            plt.close()
+            saved_paths.append(path)
+
+    # 4. Individual layer distributions for last epoch
+    if tracker.history:
+        last_snapshot = tracker.history[-1]
+        for dist in last_snapshot.distributions[:4]:  # Limit to first 4 layers
+            safe_name = dist.name.replace(".", "_")
+            path = save_dir / f"{prefix}sv_dist_{safe_name}_epoch{last_snapshot.epoch}.png"
+            plot_singular_value_distribution(
+                dist.singular_values,
+                title=f"SV Distribution: {dist.name} (Epoch {last_snapshot.epoch})",
+                save_path=path,
+            )
+            plt.close()
+            saved_paths.append(path)
+
+    return saved_paths
+
+
+# Type hint for forward reference
+if TYPE_CHECKING:
+    from vision_spectra.metrics import SpectralTracker

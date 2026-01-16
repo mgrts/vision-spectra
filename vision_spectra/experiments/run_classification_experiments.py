@@ -13,10 +13,10 @@ Key features:
 - MLflow tracking for all experiments
 
 Usage:
-    poetry run python src/experiments/run_classification_experiments.py
+    poetry run python -m vision_spectra.experiments.run_classification_experiments
 
     # Or with custom options:
-    poetry run python src/experiments/run_classification_experiments.py --dataset bloodmnist --seeds 3
+    poetry run python -m vision_spectra.experiments.run_classification_experiments --dataset bloodmnist --seeds 3
 """
 
 from __future__ import annotations
@@ -24,24 +24,20 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
-import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
 import mlflow
+from loguru import logger
 
-# Add project root to path for imports
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(PROJECT_ROOT / "src"))
-
-from loguru import logger  # noqa: E402
-
-from vision_spectra.data import get_dataset  # noqa: E402
-from vision_spectra.losses import get_loss  # noqa: E402
-from vision_spectra.models import create_vit_classifier  # noqa: E402
-from vision_spectra.settings import (  # noqa: E402
+from vision_spectra.data import get_dataset
+from vision_spectra.losses import get_loss
+from vision_spectra.models import create_vit_classifier
+from vision_spectra.settings import (
+    DATA_DIR,
+    RUNS_DIR,
     DatasetConfig,
     DatasetName,
     ExperimentConfig,
@@ -53,7 +49,7 @@ from vision_spectra.settings import (  # noqa: E402
     TrainingConfig,
     set_seed,
 )
-from vision_spectra.training import ClassificationTrainer  # noqa: E402
+from vision_spectra.training import ClassificationTrainer
 
 
 @dataclass
@@ -106,8 +102,8 @@ class ExperimentConfig_:
     # Model settings
     model_name: str = "vit_tiny_patch16_224"
 
-    # Output
-    output_dir: Path = field(default_factory=lambda: PROJECT_ROOT / "experiment_results")
+    # Output - use standard runs directory
+    output_dir: Path = field(default_factory=lambda: RUNS_DIR)
     experiment_name: str = "classification_loss_comparison"
 
 
@@ -129,10 +125,21 @@ def run_single_experiment(
     Returns:
         ExperimentResult with metrics and status
     """
+    import gc
+
+    import torch
+
     experiment_id = f"{dataset_name}_{loss_name}_seed{seed}"
     logger.info(f"Starting experiment: {experiment_id}")
 
     start_time = time.time()
+
+    # Variables to track for cleanup
+    trainer = None
+    model = None
+    train_loader = None
+    val_loader = None
+    dataset_obj = None
 
     try:
         # Set seed for reproducibility
@@ -143,8 +150,8 @@ def run_single_experiment(
             name=experiment_id,
             seed=seed,
             device="auto",
-            output_dir=config.output_dir / "runs",
-            data_dir=PROJECT_ROOT / "data",
+            output_dir=config.output_dir,
+            data_dir=DATA_DIR,
             dataset=DatasetConfig(
                 name=DatasetName(dataset_name),
                 batch_size=config.batch_size,
@@ -219,7 +226,7 @@ def run_single_experiment(
         with contextlib.suppress(Exception):
             mlflow_run_id = mlflow.active_run().info.run_id if mlflow.active_run() else None
 
-        return ExperimentResult(
+        experiment_result = ExperimentResult(
             dataset=dataset_name,
             loss=loss_name,
             seed=seed,
@@ -242,7 +249,7 @@ def run_single_experiment(
 
         traceback.print_exc()
 
-        return ExperimentResult(
+        experiment_result = ExperimentResult(
             dataset=dataset_name,
             loss=loss_name,
             seed=seed,
@@ -257,6 +264,51 @@ def run_single_experiment(
             success=False,
             error_message=str(e),
         )
+
+    finally:
+        # Clean up resources to free memory
+        logger.debug("Cleaning up experiment resources...")
+
+        # Clean up trainer (this clears model, optimizer, etc.)
+        if trainer is not None:
+            try:
+                trainer.cleanup()
+            except Exception as cleanup_error:
+                logger.warning(f"Trainer cleanup failed: {cleanup_error}")
+            del trainer
+            trainer = None
+
+        # Clean up model reference (in case trainer cleanup failed)
+        if model is not None:
+            with contextlib.suppress(Exception):
+                model.cpu()
+            del model
+            model = None
+
+        # Clean up data loaders
+        if train_loader is not None:
+            del train_loader
+            train_loader = None
+        if val_loader is not None:
+            del val_loader
+            val_loader = None
+
+        # Clean up dataset
+        if dataset_obj is not None:
+            del dataset_obj
+            dataset_obj = None
+
+        # Force garbage collection
+        gc.collect()
+
+        # Clear CUDA cache
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+
+        logger.debug("Experiment cleanup complete")
+
+    return experiment_result
 
 
 def run_all_experiments(config: ExperimentConfig_) -> list[ExperimentResult]:
@@ -480,7 +532,7 @@ def main():
 
     # Print MLflow instructions
     print("\nTo view detailed results:")
-    print(f"  cd {PROJECT_ROOT}")
+    print(f"  cd {RUNS_DIR.parent}")
     print("  poetry run mlflow ui")
     print("\nThen open http://localhost:5000 in your browser")
 

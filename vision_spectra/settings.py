@@ -188,6 +188,17 @@ class SpectralConfig(BaseModel):
     log_every_n_epochs: int = Field(default=5, gt=0, description="Logging frequency")
     log_every_n_steps: int | None = Field(default=None, description="Step-based logging")
 
+    # Distribution tracking
+    track_distributions: bool = Field(
+        default=True, description="Track full singular value distributions"
+    )
+    max_singular_values: int = Field(
+        default=100, gt=0, description="Max singular values to store per layer"
+    )
+    save_distribution_history: bool = Field(
+        default=True, description="Save distribution history to JSON"
+    )
+
     # Which layers to analyze
     layers: list[str] = Field(
         default=["blocks.0", "blocks.2", "blocks.4", "blocks.6"],

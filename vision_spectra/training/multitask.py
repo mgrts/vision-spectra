@@ -276,3 +276,22 @@ class MultitaskTrainer(BaseTrainer):
             "accuracy": self.val_accuracy.compute().item(),
             "f1_macro": self.val_f1.compute().item(),
         }
+
+    def cleanup(self) -> None:
+        """Clean up resources including multitask-specific objects."""
+        # Clean up cls_criterion
+        if hasattr(self, "cls_criterion") and self.cls_criterion is not None:
+            self.cls_criterion.cpu()
+            del self.cls_criterion
+            self.cls_criterion = None
+
+        # Clean up torchmetrics objects
+        for attr in ["train_accuracy", "val_accuracy", "val_f1"]:
+            if hasattr(self, attr):
+                metric = getattr(self, attr)
+                if metric is not None:
+                    metric.cpu()
+                    delattr(self, attr)
+
+        # Call parent cleanup
+        super().cleanup()
