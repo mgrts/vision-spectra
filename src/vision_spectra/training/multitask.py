@@ -6,13 +6,16 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import mlflow
 import torch
 import torch.nn as nn
+from loguru import logger
 from torch.cuda.amp import autocast
 from torchmetrics import Accuracy, F1Score
 from tqdm import tqdm
 
 from vision_spectra.training.base import BaseTrainer
+from vision_spectra.utils.visualization import save_mim_examples, save_prediction_examples
 
 if TYPE_CHECKING:
     from torch.utils.data import DataLoader
@@ -36,11 +39,20 @@ class MultitaskTrainer(BaseTrainer):
         val_loader: DataLoader,
         cls_criterion: nn.Module,
         num_classes: int,
+        num_channels: int = 3,
+        class_names: list[str] | None = None,
     ) -> None:
-        super().__init__(config, model, train_loader, val_loader)
+        super().__init__(
+            config,
+            model,
+            train_loader,
+            val_loader,
+            num_classes=num_classes,
+            num_channels=num_channels,
+            class_names=class_names,
+        )
 
         self.cls_criterion = cls_criterion.to(self.device)
-        self.num_classes = num_classes
 
         # MTL weights
         self.cls_weight = config.loss.mtl_cls_weight
@@ -52,6 +64,78 @@ class MultitaskTrainer(BaseTrainer):
         self.train_accuracy = Accuracy(task=task, num_classes=num_classes).to(self.device)
         self.val_accuracy = Accuracy(task=task, num_classes=num_classes).to(self.device)
         self.val_f1 = F1Score(task=task, num_classes=num_classes, average="macro").to(self.device)
+
+    def _save_prediction_examples(self, num_examples: int = 16) -> None:
+        """
+        Save both classification prediction examples and MIM reconstruction examples.
+
+        Args:
+            num_examples: Number of examples to save
+        """
+        saved_paths = []
+
+        # Save classification prediction examples
+        try:
+            logger.debug("Saving classification prediction examples...")
+
+            cls_paths = save_prediction_examples(
+                model=self.model,  # MultitaskViT defaults to classification mode
+                dataloader=self.val_loader,
+                save_dir=self.artifacts_dir,
+                num_examples=num_examples,
+                num_channels=self.num_channels,
+                class_names=self.class_names,
+                device=self.device,
+            )
+            saved_paths.extend(cls_paths)
+
+        except Exception as e:
+            logger.warning(f"Failed to save classification examples: {e}")
+
+        # Save MIM reconstruction examples
+        try:
+            logger.debug("Saving MIM examples...")
+
+            # Create a wrapper that calls model in MIM mode
+            class MIMWrapper(nn.Module):
+                def __init__(self, mtl_model):
+                    super().__init__()
+                    self.mtl_model = mtl_model
+
+                def forward(self, x):
+                    return self.mtl_model(x, mode="mim")
+
+                @property
+                def patch_size(self):
+                    return self.mtl_model.patch_size
+
+                def unpatchify(self, x):
+                    return self.mtl_model.unpatchify(x)
+
+            mim_wrapper = MIMWrapper(self.model)
+
+            mim_paths = save_mim_examples(
+                model=mim_wrapper,
+                dataloader=self.val_loader,
+                save_dir=self.artifacts_dir,
+                num_examples=min(8, num_examples),
+                num_channels=self.num_channels,
+                device=self.device,
+            )
+            saved_paths.extend(mim_paths)
+
+        except Exception as e:
+            logger.warning(f"Failed to save MIM examples: {e}")
+
+        # Log all artifacts to MLflow
+        for path in saved_paths:
+            try:
+                artifact_subdir = "mim_examples" if "mim" in path.name else "predictions"
+                mlflow.log_artifact(str(path), artifact_path=artifact_subdir)
+            except Exception as e:
+                logger.warning(f"Failed to log artifact {path}: {e}")
+
+        logger.debug(f"Saved {len(saved_paths)} example images total")
 
     def train_epoch(self) -> dict[str, float]:
         """Train for one epoch."""

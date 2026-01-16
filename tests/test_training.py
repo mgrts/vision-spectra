@@ -163,6 +163,7 @@ class TestSmokeTraining:
             val_loader=val_loader,
             criterion=criterion,
             num_classes=info.num_classes,
+            num_channels=info.num_channels,
         )
 
         # Train one epoch manually
@@ -226,6 +227,7 @@ class TestSmokeTraining:
             model=model,
             train_loader=train_loader,
             val_loader=val_loader,
+            num_channels=info.num_channels,
         )
 
         train_metrics = trainer.train_epoch()
@@ -293,6 +295,7 @@ class TestSmokeTraining:
             val_loader=val_loader,
             cls_criterion=cls_criterion,
             num_classes=info.num_classes,
+            num_channels=info.num_channels,
         )
 
         train_metrics = trainer.train_epoch()

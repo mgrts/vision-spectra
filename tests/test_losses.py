@@ -313,3 +313,318 @@ class TestMIMLosses:
 
         assert torch.isfinite(loss)
         assert loss >= 0
+
+    def test_cauchy_loss(self):
+        """Test Cauchy loss for robust reconstruction."""
+        from vision_spectra.losses import CauchyLoss
+
+        loss_fn = CauchyLoss(gamma=1.0)
+
+        pred = torch.randn(8, 49, 48)
+        target = torch.randn(8, 49, 48)
+
+        loss = loss_fn(pred, target)
+
+        assert torch.isfinite(loss)
+        assert loss >= 0
+
+    def test_cauchy_loss_with_mask(self):
+        """Test Cauchy loss with mask."""
+        from vision_spectra.losses import CauchyLoss
+
+        loss_fn = CauchyLoss(gamma=2.0)
+
+        pred = torch.randn(8, 49, 48)
+        target = torch.randn(8, 49, 48)
+        mask = torch.zeros(8, 49)
+        mask[:, :25] = 1
+
+        loss = loss_fn(pred, target, mask=mask)
+
+        assert torch.isfinite(loss)
+
+    def test_cauchy_outlier_robustness(self):
+        """Test that Cauchy loss is more robust to outliers than MSE."""
+        from vision_spectra.losses import CauchyLoss, MSELoss
+
+        cauchy_fn = CauchyLoss(gamma=1.0)
+        mse_fn = MSELoss()
+
+        # Normal data
+        pred = torch.zeros(100)
+        target = torch.randn(100) * 0.1
+
+        cauchy_normal = cauchy_fn(pred, target)
+        mse_normal = mse_fn(pred, target)
+
+        # Add outlier
+        target_outlier = target.clone()
+        target_outlier[0] = 10.0  # Large outlier
+
+        cauchy_outlier = cauchy_fn(pred, target_outlier)
+        mse_outlier = mse_fn(pred, target_outlier)
+
+        # MSE should increase much more than Cauchy
+        mse_ratio = mse_outlier / mse_normal
+        cauchy_ratio = cauchy_outlier / cauchy_normal
+
+        assert cauchy_ratio < mse_ratio  # Cauchy is more robust
+
+    def test_sgt_loss(self):
+        """Test SGT loss for heavy-tailed reconstruction."""
+        from vision_spectra.losses import SGTLoss
+
+        loss_fn = SGTLoss(p=2.0, q=2.0, lam=0.0, sigma=1.0)
+
+        pred = torch.randn(8, 49, 48)
+        target = torch.randn(8, 49, 48)
+
+        loss = loss_fn(pred, target)
+
+        assert torch.isfinite(loss)
+        assert loss >= 0
+
+    def test_sgt_loss_with_mask(self):
+        """Test SGT loss with mask."""
+        from vision_spectra.losses import SGTLoss
+
+        loss_fn = SGTLoss(p=2.0, q=3.0, lam=0.1, sigma=0.5)
+
+        pred = torch.randn(8, 49, 48)
+        target = torch.randn(8, 49, 48)
+        mask = torch.zeros(8, 49)
+        mask[:, :25] = 1
+
+        loss = loss_fn(pred, target, mask=mask)
+
+        assert torch.isfinite(loss)
+
+    def test_sgt_skewness(self):
+        """Test SGT loss with different skewness values."""
+        from vision_spectra.losses import SGTLoss
+
+        # Test symmetric
+        loss_sym = SGTLoss(p=2.0, q=2.0, lam=0.0)
+
+        # Test positive skew
+        loss_pos = SGTLoss(p=2.0, q=2.0, lam=0.5)
+
+        # Test negative skew
+        loss_neg = SGTLoss(p=2.0, q=2.0, lam=-0.5)
+
+        pred = torch.zeros(100)
+        target = torch.randn(100)
+
+        # All should produce valid losses
+        for loss_fn in [loss_sym, loss_pos, loss_neg]:
+            loss = loss_fn(pred, target)
+            assert torch.isfinite(loss)
+            assert loss >= 0
+
+    def test_sgt_invalid_params(self):
+        """Test SGT loss parameter validation."""
+        from vision_spectra.losses import SGTLoss
+
+        # Invalid p
+        with pytest.raises(ValueError):
+            SGTLoss(p=-1.0)
+
+        # Invalid q
+        with pytest.raises(ValueError):
+            SGTLoss(q=0.0)
+
+        # Invalid lambda
+        with pytest.raises(ValueError):
+            SGTLoss(lam=1.5)
+
+        # Invalid sigma
+        with pytest.raises(ValueError):
+            SGTLoss(sigma=-1.0)
+
+    def test_cauchy_invalid_gamma(self):
+        """Test Cauchy loss parameter validation."""
+        from vision_spectra.losses import CauchyLoss
+
+        with pytest.raises(ValueError):
+            CauchyLoss(gamma=-1.0)
+
+        with pytest.raises(ValueError):
+            CauchyLoss(gamma=0.0)
+
+    def test_huber_loss(self):
+        """Test Huber loss for robust reconstruction."""
+        from vision_spectra.losses import HuberLoss
+
+        loss_fn = HuberLoss(delta=1.0)
+
+        pred = torch.randn(8, 49, 48)
+        target = torch.randn(8, 49, 48)
+
+        loss = loss_fn(pred, target)
+
+        assert torch.isfinite(loss)
+        assert loss >= 0
+
+    def test_huber_loss_with_mask(self):
+        """Test Huber loss with mask."""
+        from vision_spectra.losses import HuberLoss
+
+        loss_fn = HuberLoss(delta=0.5)
+
+        pred = torch.randn(8, 49, 48)
+        target = torch.randn(8, 49, 48)
+        mask = torch.zeros(8, 49)
+        mask[:, :25] = 1
+
+        loss = loss_fn(pred, target, mask=mask)
+
+        assert torch.isfinite(loss)
+
+    def test_huber_quadratic_linear_transition(self):
+        """Test that Huber loss transitions from quadratic to linear."""
+        from vision_spectra.losses import HuberLoss
+
+        delta = 1.0
+        loss_fn = HuberLoss(delta=delta, reduction="none")
+
+        # Small errors (quadratic region)
+        pred = torch.zeros(10)
+        target_small = torch.full((10,), 0.5)  # |error| = 0.5 < delta
+        loss_small = loss_fn(pred, target_small)
+
+        # Expected: 0.5 * 0.5^2 = 0.125
+        expected_small = 0.5 * 0.5**2
+        assert torch.allclose(loss_small, torch.full_like(loss_small, expected_small))
+
+        # Large errors (linear region)
+        target_large = torch.full((10,), 2.0)  # |error| = 2.0 > delta
+        loss_large = loss_fn(pred, target_large)
+
+        # Expected: delta * (|error| - 0.5 * delta) = 1.0 * (2.0 - 0.5) = 1.5
+        expected_large = delta * (2.0 - 0.5 * delta)
+        assert torch.allclose(loss_large, torch.full_like(loss_large, expected_large))
+
+    def test_huber_invalid_delta(self):
+        """Test Huber loss parameter validation."""
+        from vision_spectra.losses import HuberLoss
+
+        with pytest.raises(ValueError):
+            HuberLoss(delta=-1.0)
+
+        with pytest.raises(ValueError):
+            HuberLoss(delta=0.0)
+
+    def test_tukey_loss(self):
+        """Test Tukey biweight loss for robust reconstruction."""
+        from vision_spectra.losses import TukeyLoss
+
+        loss_fn = TukeyLoss(c=4.685)
+
+        pred = torch.randn(8, 49, 48)
+        target = torch.randn(8, 49, 48)
+
+        loss = loss_fn(pred, target)
+
+        assert torch.isfinite(loss)
+        assert loss >= 0
+
+    def test_tukey_loss_with_mask(self):
+        """Test Tukey loss with mask."""
+        from vision_spectra.losses import TukeyLoss
+
+        loss_fn = TukeyLoss(c=2.0)
+
+        pred = torch.randn(8, 49, 48)
+        target = torch.randn(8, 49, 48)
+        mask = torch.zeros(8, 49)
+        mask[:, :25] = 1
+
+        loss = loss_fn(pred, target, mask=mask)
+
+        assert torch.isfinite(loss)
+
+    def test_tukey_outlier_rejection(self):
+        """Test that Tukey loss rejects outliers (constant loss beyond threshold)."""
+        from vision_spectra.losses import TukeyLoss
+
+        c = 2.0
+        loss_fn = TukeyLoss(c=c, reduction="none")
+
+        pred = torch.zeros(10)
+
+        # Errors at the boundary
+        target_boundary = torch.full((10,), c)
+        loss_boundary = loss_fn(pred, target_boundary)
+
+        # Errors beyond the boundary (should have same loss)
+        target_outlier = torch.full((10,), c * 10)  # 10x the threshold
+        loss_outlier = loss_fn(pred, target_outlier)
+
+        # Both should be at max loss = c^2 / 6
+        max_loss = c**2 / 6.0
+        assert torch.allclose(loss_boundary, torch.full_like(loss_boundary, max_loss), rtol=1e-4)
+        assert torch.allclose(loss_outlier, torch.full_like(loss_outlier, max_loss), rtol=1e-4)
+
+    def test_tukey_zero_error(self):
+        """Test Tukey loss with zero error."""
+        from vision_spectra.losses import TukeyLoss
+
+        loss_fn = TukeyLoss(c=4.685, reduction="none")
+
+        pred = torch.randn(10)
+        target = pred.clone()  # Zero error
+
+        loss = loss_fn(pred, target)
+
+        # Zero error should give zero loss
+        assert torch.allclose(loss, torch.zeros_like(loss), atol=1e-6)
+
+    def test_tukey_invalid_c(self):
+        """Test Tukey loss parameter validation."""
+        from vision_spectra.losses import TukeyLoss
+
+        with pytest.raises(ValueError):
+            TukeyLoss(c=-1.0)
+
+        with pytest.raises(ValueError):
+            TukeyLoss(c=0.0)
+
+    def test_robust_loss_comparison(self):
+        """Compare robustness of different losses to outliers."""
+        from vision_spectra.losses import CauchyLoss, HuberLoss, MSELoss, TukeyLoss
+
+        mse_fn = MSELoss()
+        huber_fn = HuberLoss(delta=1.0)
+        cauchy_fn = CauchyLoss(gamma=1.0)
+        tukey_fn = TukeyLoss(c=4.685)
+
+        # Normal data
+        torch.manual_seed(42)
+        pred = torch.zeros(100)
+        target = torch.randn(100) * 0.5
+
+        losses_normal = {
+            "mse": mse_fn(pred, target).item(),
+            "huber": huber_fn(pred, target).item(),
+            "cauchy": cauchy_fn(pred, target).item(),
+            "tukey": tukey_fn(pred, target).item(),
+        }
+
+        # Add outliers
+        target_outlier = target.clone()
+        target_outlier[:5] = 100.0  # 5% gross outliers
+
+        losses_outlier = {
+            "mse": mse_fn(pred, target_outlier).item(),
+            "huber": huber_fn(pred, target_outlier).item(),
+            "cauchy": cauchy_fn(pred, target_outlier).item(),
+            "tukey": tukey_fn(pred, target_outlier).item(),
+        }
+
+        # Compute increase ratios
+        ratios = {k: losses_outlier[k] / losses_normal[k] for k in losses_normal}
+
+        # MSE should be most affected, Tukey least affected
+        assert ratios["mse"] > ratios["huber"]
+        assert ratios["huber"] > ratios["cauchy"]
+        # Tukey should be most robust (nearly constant for outliers)

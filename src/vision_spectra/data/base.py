@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
+import torch
 from torch.utils.data import DataLoader, Dataset
 
 if TYPE_CHECKING:
@@ -47,6 +48,16 @@ class BaseDataset(ABC):
         self.data_dir = data_dir
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
+    @property
+    def _pin_memory(self) -> bool:
+        """Get pin_memory setting, disabled for MPS devices."""
+        if not self.config.pin_memory:
+            return False
+        # MPS doesn't support pin_memory
+        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            return False
+        return True
+
     @abstractmethod
     def get_train_dataset(self) -> Dataset:
         """Get training dataset."""
@@ -74,7 +85,7 @@ class BaseDataset(ABC):
             batch_size=self.config.batch_size,
             shuffle=shuffle,
             num_workers=self.config.num_workers,
-            pin_memory=self.config.pin_memory,
+            pin_memory=self._pin_memory,
             drop_last=True,
         )
 
@@ -85,7 +96,7 @@ class BaseDataset(ABC):
             batch_size=self.config.batch_size,
             shuffle=False,
             num_workers=self.config.num_workers,
-            pin_memory=self.config.pin_memory,
+            pin_memory=self._pin_memory,
             drop_last=False,
         )
 
@@ -96,7 +107,7 @@ class BaseDataset(ABC):
             batch_size=self.config.batch_size,
             shuffle=False,
             num_workers=self.config.num_workers,
-            pin_memory=self.config.pin_memory,
+            pin_memory=self._pin_memory,
             drop_last=False,
         )
 

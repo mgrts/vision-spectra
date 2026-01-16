@@ -6,11 +6,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import mlflow
 import torch
+from loguru import logger
 from torch.cuda.amp import autocast
 from tqdm import tqdm
 
 from vision_spectra.training.base import BaseTrainer
+from vision_spectra.utils.visualization import save_mim_examples
 
 if TYPE_CHECKING:
     from torch.utils.data import DataLoader
@@ -28,10 +31,46 @@ class MIMTrainer(BaseTrainer):
         model: MIMModel,
         train_loader: DataLoader,
         val_loader: DataLoader,
+        num_channels: int = 3,
     ) -> None:
-        super().__init__(config, model, train_loader, val_loader)
+        super().__init__(
+            config,
+            model,
+            train_loader,
+            val_loader,
+            num_channels=num_channels,
+        )
 
         self.mask_ratio = config.model.mask_ratio
+
+    def _save_prediction_examples(self, num_examples: int = 8) -> None:
+        """
+        Save MIM reconstruction examples as artifacts to MLflow.
+
+        Args:
+            num_examples: Number of examples to save
+        """
+        try:
+            logger.debug("Saving MIM examples...")
+
+            # Save MIM visualizations (original, masked, reconstructed)
+            saved_paths = save_mim_examples(
+                model=self.model,
+                dataloader=self.val_loader,
+                save_dir=self.artifacts_dir,
+                num_examples=num_examples,
+                num_channels=self.num_channels,
+                device=self.device,
+            )
+
+            # Log artifacts to MLflow
+            for path in saved_paths:
+                mlflow.log_artifact(str(path), artifact_path="mim_examples")
+
+            logger.debug(f"Saved {len(saved_paths)} MIM example images")
+
+        except Exception as e:
+            logger.warning(f"Failed to save MIM examples: {e}")
 
     def train_epoch(self) -> dict[str, float]:
         """Train for one epoch."""

@@ -27,6 +27,7 @@ from torch.utils.data import DataLoader
 
 from vision_spectra.metrics.extraction import extract_all_weights
 from vision_spectra.metrics.spectral import aggregate_spectral_metrics, get_spectral_metrics
+from vision_spectra.utils.visualization import save_prediction_examples
 
 if TYPE_CHECKING:
     from vision_spectra.settings import ExperimentConfig
@@ -47,11 +48,17 @@ class BaseTrainer(ABC):
         model: nn.Module,
         train_loader: DataLoader,
         val_loader: DataLoader,
+        num_classes: int = 10,
+        num_channels: int = 3,
+        class_names: list[str] | None = None,
     ) -> None:
         self.config = config
         self.model = model
         self.train_loader = train_loader
         self.val_loader = val_loader
+        self.num_classes = num_classes
+        self.num_channels = num_channels
+        self.class_names = class_names
 
         # Setup device
         self.device = config.get_device()
@@ -74,6 +81,8 @@ class BaseTrainer(ABC):
         self.run_dir = config.get_run_dir()
         self.checkpoint_dir = self.run_dir / "checkpoints"
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        self.artifacts_dir = self.run_dir / "artifacts"
+        self.artifacts_dir.mkdir(parents=True, exist_ok=True)
 
         # Smoke test mode
         if config.training.smoke_test:
@@ -224,6 +233,9 @@ class BaseTrainer(ABC):
                     self.best_val_metric = val_metric
                     best_checkpoint = self._save_checkpoint("best.pt")
                     self.patience_counter = 0
+
+                    # Save prediction examples for best model
+                    self._save_prediction_examples()
                 else:
                     self.patience_counter += 1
 
@@ -309,6 +321,36 @@ class BaseTrainer(ABC):
         """Check if current validation metric is best."""
         # Lower is better for loss
         return val_metric < self.best_val_metric
+
+    def _save_prediction_examples(self, num_examples: int = 16) -> None:
+        """
+        Save prediction examples as artifacts to MLflow.
+
+        Args:
+            num_examples: Number of examples to save
+        """
+        try:
+            logger.debug("Saving prediction examples...")
+
+            # Save prediction visualizations
+            saved_paths = save_prediction_examples(
+                model=self.model,
+                dataloader=self.val_loader,
+                save_dir=self.artifacts_dir,
+                num_examples=num_examples,
+                num_channels=self.num_channels,
+                class_names=self.class_names,
+                device=self.device,
+            )
+
+            # Log artifacts to MLflow
+            for path in saved_paths:
+                mlflow.log_artifact(str(path), artifact_path="predictions")
+
+            logger.debug(f"Saved {len(saved_paths)} prediction example images")
+
+        except Exception as e:
+            logger.warning(f"Failed to save prediction examples: {e}")
 
     def _log_metrics(self, metrics: dict[str, float], prefix: str = "") -> None:
         """Log metrics to MLflow."""

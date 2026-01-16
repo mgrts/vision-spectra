@@ -37,6 +37,8 @@ class FinetuneTrainer(ClassificationTrainer):
         val_loader: DataLoader,
         criterion: nn.Module,
         num_classes: int,
+        num_channels: int = 3,
+        class_names: list[str] | None = None,
         pretrained_path: Path | None = None,
         freeze_encoder: bool = False,
         encoder_lr_scale: float = 0.1,
@@ -45,7 +47,16 @@ class FinetuneTrainer(ClassificationTrainer):
         if pretrained_path is not None:
             self._load_pretrained(model, pretrained_path)
 
-        super().__init__(config, model, train_loader, val_loader, criterion, num_classes)
+        super().__init__(
+            config,
+            model,
+            train_loader,
+            val_loader,
+            criterion,
+            num_classes,
+            num_channels=num_channels,
+            class_names=class_names,
+        )
 
         self.freeze_encoder = freeze_encoder
         self.encoder_lr_scale = encoder_lr_scale

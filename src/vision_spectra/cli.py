@@ -136,6 +136,8 @@ def train_classification(
         val_loader=val_loader,
         criterion=criterion,
         num_classes=info.num_classes,
+        num_channels=info.num_channels,
+        class_names=info.class_names,
     )
 
     # Train
@@ -222,6 +224,7 @@ def pretrain_mim(
         model=model_obj,
         train_loader=train_loader,
         val_loader=val_loader,
+        num_channels=info.num_channels,
     )
 
     # Train
@@ -311,6 +314,8 @@ def finetune(
         val_loader=val_loader,
         criterion=criterion,
         num_classes=info.num_classes,
+        num_channels=info.num_channels,
+        class_names=info.class_names,
         pretrained_path=checkpoint,
         freeze_encoder=freeze_encoder,
         encoder_lr_scale=encoder_lr_scale,
@@ -413,6 +418,8 @@ def train_multitask(
         val_loader=val_loader,
         cls_criterion=cls_criterion,
         num_classes=info.num_classes,
+        num_channels=info.num_channels,
+        class_names=info.class_names,
     )
 
     # Train

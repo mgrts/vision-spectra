@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 import torch
 import torch.nn as nn
 from torch.cuda.amp import autocast
-from torchmetrics import Accuracy, F1Score
+from torchmetrics import AUROC, Accuracy, F1Score
 from tqdm import tqdm
 
 from vision_spectra.training.base import BaseTrainer
@@ -36,17 +36,27 @@ class ClassificationTrainer(BaseTrainer):
         val_loader: DataLoader,
         criterion: nn.Module,
         num_classes: int,
+        num_channels: int = 3,
+        class_names: list[str] | None = None,
     ) -> None:
-        super().__init__(config, model, train_loader, val_loader)
+        super().__init__(
+            config,
+            model,
+            train_loader,
+            val_loader,
+            num_classes=num_classes,
+            num_channels=num_channels,
+            class_names=class_names,
+        )
 
         self.criterion = criterion.to(self.device)
-        self.num_classes = num_classes
 
         # Metrics
         task = "multiclass"
         self.train_accuracy = Accuracy(task=task, num_classes=num_classes).to(self.device)
         self.val_accuracy = Accuracy(task=task, num_classes=num_classes).to(self.device)
         self.val_f1 = F1Score(task=task, num_classes=num_classes, average="macro").to(self.device)
+        self.val_auroc = AUROC(task=task, num_classes=num_classes, average="macro").to(self.device)
 
     def train_epoch(self) -> dict[str, float]:
         """Train for one epoch."""
@@ -129,6 +139,7 @@ class ClassificationTrainer(BaseTrainer):
         self.model.eval()
         self.val_accuracy.reset()
         self.val_f1.reset()
+        self.val_auroc.reset()
 
         total_loss = 0.0
         num_batches = 0
@@ -157,13 +168,16 @@ class ClassificationTrainer(BaseTrainer):
                 num_batches += 1
 
                 preds = logits.argmax(dim=-1)
+                probs = torch.softmax(logits, dim=-1)
                 self.val_accuracy.update(preds, targets)
                 self.val_f1.update(preds, targets)
+                self.val_auroc.update(probs, targets)
 
         return {
             "loss": total_loss / max(num_batches, 1),
             "accuracy": self.val_accuracy.compute().item(),
             "f1_macro": self.val_f1.compute().item(),
+            "auroc": self.val_auroc.compute().item(),
         }
 
     def _is_best(self, val_metric: float) -> bool:

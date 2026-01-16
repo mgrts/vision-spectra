@@ -8,9 +8,13 @@ from vision_spectra.losses.classification import (
     LabelSmoothingLoss,
 )
 from vision_spectra.losses.reconstruction import (
+    CauchyLoss,
+    HuberLoss,
     L1Loss,
     MSELoss,
+    SGTLoss,
     SmoothL1Loss,
+    TukeyLoss,
 )
 from vision_spectra.losses.registry import LOSS_REGISTRY, get_loss, get_mim_loss
 
@@ -26,4 +30,8 @@ __all__ = [
     "MSELoss",
     "L1Loss",
     "SmoothL1Loss",
+    "CauchyLoss",
+    "SGTLoss",
+    "HuberLoss",
+    "TukeyLoss",
 ]
