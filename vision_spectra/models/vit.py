@@ -26,6 +26,8 @@ class ViTClassifier(nn.Module):
     - Forward pass for classification
     - Feature extraction before classification head
     - Weight matrices for spectral analysis
+
+    Supports configurable embed_dim and depth for expressivity control experiments.
     """
 
     def __init__(
@@ -38,6 +40,9 @@ class ViTClassifier(nn.Module):
         drop_rate: float = 0.0,
         attn_drop_rate: float = 0.0,
         drop_path_rate: float = 0.1,
+        embed_dim: int | None = None,
+        depth: int | None = None,
+        num_heads: int | None = None,
     ) -> None:
         super().__init__()
 
@@ -46,17 +51,30 @@ class ViTClassifier(nn.Module):
         self.num_channels = num_channels
         self.image_size = image_size
 
+        # Build kwargs for model creation
+        model_kwargs = {
+            "pretrained": pretrained,
+            "num_classes": num_classes,
+            "in_chans": num_channels,
+            "img_size": image_size,
+            "drop_rate": drop_rate,
+            "attn_drop_rate": attn_drop_rate,
+            "drop_path_rate": drop_path_rate,
+        }
+
+        # Add optional architecture customization for expressivity control
+        if embed_dim is not None:
+            model_kwargs["embed_dim"] = embed_dim
+        if depth is not None:
+            model_kwargs["depth"] = depth
+        if num_heads is not None:
+            model_kwargs["num_heads"] = num_heads
+        elif embed_dim is not None:
+            # Auto-calculate num_heads based on embed_dim
+            model_kwargs["num_heads"] = max(1, embed_dim // 32)
+
         # Create model with custom configuration
-        self.encoder = timm.create_model(
-            model_name,
-            pretrained=pretrained,
-            num_classes=num_classes,
-            in_chans=num_channels,
-            img_size=image_size,
-            drop_rate=drop_rate,
-            attn_drop_rate=attn_drop_rate,
-            drop_path_rate=drop_path_rate,
-        )
+        self.encoder = timm.create_model(model_name, **model_kwargs)
 
         # Store model config
         self.embed_dim = self.encoder.embed_dim
@@ -161,6 +179,9 @@ def create_vit_classifier(
     num_classes: int,
     num_channels: int = 3,
     image_size: int = 28,
+    embed_dim: int | None = None,
+    depth: int | None = None,
+    num_heads: int | None = None,
 ) -> ViTClassifier:
     """
     Create a ViT classifier from config.
@@ -170,6 +191,9 @@ def create_vit_classifier(
         num_classes: Number of output classes
         num_channels: Number of input channels
         image_size: Input image size
+        embed_dim: Override embedding dimension (for expressivity control)
+        depth: Override number of transformer blocks (for expressivity control)
+        num_heads: Override number of attention heads
 
     Returns:
         ViTClassifier instance
@@ -183,6 +207,9 @@ def create_vit_classifier(
         drop_rate=config.drop_rate,
         attn_drop_rate=config.attn_drop_rate,
         drop_path_rate=config.drop_path_rate,
+        embed_dim=embed_dim,
+        depth=depth,
+        num_heads=num_heads,
     )
 
 

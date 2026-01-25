@@ -80,7 +80,55 @@ vision-spectra train-cls --dataset synthetic --epochs 2 --smoke-test
 
 ## Running Experiments
 
-This project provides two experiment modules for systematic analysis of how loss functions affect transformer weight spectra.
+This project provides experiment modules for systematic analysis of how loss functions affect transformer weight spectra.
+
+---
+
+### Core Three-Scenario Experiment Framework
+
+The research is structured around three key scenarios that test the relationship between network expressivity, data complexity, and spectral properties:
+
+| Scenario | ID | Network | Data | Expected α | Expected r_s | Purpose |
+|----------|----|---------|------|------------|--------------|---------|
+| **A: Expressive + Simple** | `EXP_A` | ViT-Tiny (full) | Synthetic shapes (3 classes, 1K samples) | Low (~1-2) | High | Baseline: no compression needed |
+| **B: Expressive + Complex** | `EXP_B` | ViT-Tiny (full) | PathMNIST (9 classes, 89K samples) | High (~3-5) | Low | Main: compression regime |
+| **C: Reduced + Complex** | `EXP_C` | ViT-Tiny (narrow) | PathMNIST (9 classes, 89K samples) | Low (~1-2) | Medium-High | Control: insufficient capacity |
+
+**Hypothesis:** Heavy-tailed spectra emerge when an expressive network must compress complex data, while simpler data or reduced capacity leads to more uniform singular value distributions.
+
+#### Running the Three Scenarios
+
+```bash
+# Scenario A: Expressive + Simple (synthetic data)
+poetry run python -m vision_spectra.experiments.run_synthetic_experiments run \
+    --num-classes 3 \
+    --num-samples 1000 \
+    --epochs 30 \
+    --num-seeds 3 \
+    --log-every-n-epochs 2 \
+    --device auto
+
+# Scenario B: Expressive + Complex (real medical data)
+poetry run vision-spectra experiments run \
+    --dataset pathmnist \
+    --losses cross_entropy \
+    --epochs 50 \
+    --num-seeds 3 \
+    --log-every-n-epochs 5 \
+    --log-first-epochs \
+    --track-distributions \
+    --device auto
+
+# Scenario C: Reduced Expressivity + Complex (narrow network)
+# Requires spectral analysis module with model width configuration
+poetry run python -m vision_spectra.experiments.run_spectral_analysis run \
+    --scenario reduced_expressivity \
+    --dataset pathmnist \
+    --model-width 96 \
+    --epochs 50 \
+    --num-seeds 3 \
+    --device auto
+```
 
 ---
 
@@ -244,6 +292,34 @@ poetry run python -m vision_spectra.experiments.run_synthetic_experiments compar
     --epochs 30 \
     --device auto
 ```
+
+---
+
+### Extended Experiment Matrix
+
+For comprehensive analysis, experiments can be run across multiple model variants and datasets:
+
+| Model Variant | Synthetic (Simple) | PathMNIST | BloodMNIST | DermaMNIST |
+|---------------|-------------------|-----------|------------|------------|
+| ViT-Tiny (embed=192, depth=6) | `A1` | `B1` | `B1b` | `B1c` |
+| ViT-Tiny-Narrow (embed=96) | `A2` | `C1` | `C1b` | `C1c` |
+| ViT-Tiny-Shallow (depth=3) | `A3` | `C2` | `C2b` | `C2c` |
+| ViT-Small (embed=384, depth=6) | `A4` | `B2` | `B2b` | `B2c` |
+
+### Implementation Status
+
+| Component | Status | Notes |
+|-----------|--------|-------|
+| Spectral metrics | ✅ Complete | `vision_spectra/metrics/spectral.py` |
+| Weight extraction | ✅ Complete | `vision_spectra/metrics/extraction.py` |
+| Synthetic data | ✅ Complete | `vision_spectra/data/synthetic.py` |
+| Classification experiments | ✅ Complete | Scenario B fully supported |
+| Synthetic experiments | ✅ Complete | Scenario A fully supported |
+| Narrow network variant | ✅ Complete | `embed_dim`/`depth` params in ViT |
+| Spectral analysis pipeline | ✅ Complete | `run_spectral_analysis.py` |
+| Gradient alignment metric | ✅ Complete | `vision_spectra/metrics/gradient_alignment.py` |
+| CCDF/log-log plots | ✅ Complete | `vision_spectra/metrics/plotting.py` |
+| Statistical comparison | ✅ Complete | `vision_spectra/metrics/statistical.py` |
 
 #### Shapes in Synthetic Data
 

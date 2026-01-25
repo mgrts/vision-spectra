@@ -54,9 +54,7 @@ class BaseDataset(ABC):
         if not self.config.pin_memory:
             return False
         # MPS doesn't support pin_memory
-        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-            return False
-        return True
+        return not (hasattr(torch.backends, "mps") and torch.backends.mps.is_available())
 
     @abstractmethod
     def get_train_dataset(self) -> Dataset:

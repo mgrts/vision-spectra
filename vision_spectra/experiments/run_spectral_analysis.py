@@ -430,10 +430,10 @@ def run_scenario_experiment(
                     batch_size=config.batch_size,
                     sample_ratio=1.0 if config.num_samples is None else 0.5,
                 )
-                train_loader, val_loader, test_loader = get_dataset(
-                    dataset_config,
-                    data_dir=DATA_DIR,
-                )
+                dataset_obj = get_dataset(dataset_config, data_dir=DATA_DIR)
+                train_loader = dataset_obj.get_train_loader()
+                val_loader = dataset_obj.get_val_loader()
+                # test_loader available via dataset_obj.get_test_loader() if needed
 
             # Setup loss and optimizer
             criterion = torch.nn.CrossEntropyLoss()
