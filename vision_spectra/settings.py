@@ -29,7 +29,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 def get_project_root() -> Path:
     """Get project root directory."""
-    return Path(__file__).resolve().parents[2]
+    return Path(__file__).resolve().parents[1]
 
 
 PROJECT_ROOT = get_project_root()
@@ -104,6 +104,12 @@ class DatasetConfig(BaseModel):
     batch_size: int = Field(default=64, gt=0, description="Batch size")
     num_workers: int = Field(default=4, ge=0, description="DataLoader workers")
     pin_memory: bool = Field(default=True, description="Pin memory for GPU")
+    sample_ratio: float = Field(
+        default=1.0,
+        gt=0.0,
+        le=1.0,
+        description="Fraction of dataset to use (0-1]. Use <1 for faster experiments.",
+    )
 
     # Synthetic dataset specific
     num_classes: int = Field(default=5, gt=1, description="Number of classes (synthetic)")
@@ -115,7 +121,9 @@ class DatasetConfig(BaseModel):
 class ModelConfig(BaseModel):
     """Model configuration."""
 
-    name: str = Field(default="vit_tiny_patch16_224", description="Model name from timm")
+    name: str = Field(
+        default="vit_small_patch14_dinov2.lvd142m", description="Model name from timm"
+    )
     pretrained: bool = Field(default=False, description="Use pretrained weights")
     drop_rate: float = Field(default=0.0, ge=0, le=1, description="Dropout rate")
     attn_drop_rate: float = Field(default=0.0, ge=0, le=1, description="Attention dropout")
@@ -187,21 +195,25 @@ class SpectralConfig(BaseModel):
     enabled: bool = Field(default=True, description="Enable spectral logging")
     log_every_n_epochs: int = Field(default=5, gt=0, description="Logging frequency")
     log_every_n_steps: int | None = Field(default=None, description="Step-based logging")
+    log_first_epochs: bool = Field(
+        default=True,
+        description="Log spectral metrics for first 5 epochs (0-4) to capture initial dynamics",
+    )
 
     # Distribution tracking
     track_distributions: bool = Field(
-        default=True, description="Track full singular value distributions"
+        default=False, description="Track full singular value distributions (memory intensive)"
     )
     max_singular_values: int = Field(
-        default=100, gt=0, description="Max singular values to store per layer"
+        default=50, gt=0, description="Max singular values to store per layer"
     )
     save_distribution_history: bool = Field(
-        default=True, description="Save distribution history to JSON"
+        default=False, description="Save distribution history to JSON (memory intensive)"
     )
 
-    # Which layers to analyze
+    # Which layers to analyze (fewer layers = less memory)
     layers: list[str] = Field(
-        default=["blocks.0", "blocks.2", "blocks.4", "blocks.6"],
+        default=["blocks.0", "blocks.5"],
         description="Layer patterns to analyze",
     )
 
@@ -228,7 +240,7 @@ class ExperimentConfig(BaseModel):
     spectral: SpectralConfig = Field(default_factory=SpectralConfig)
 
     # Paths
-    output_dir: Path = Field(default=RUNS_DIR, description="Output directory")
+    output_dir: Path = Field(default=MLRUNS_DIR, description="Output directory for mlflow")
     data_dir: Path = Field(default=DATA_DIR, description="Data directory")
 
     def get_device(self) -> torch.device:
@@ -325,5 +337,5 @@ class EnvSettings(BaseSettings):
     seed: int = 42
     device: str = "auto"
     data_dir: Path = DATA_DIR
-    output_dir: Path = RUNS_DIR
+    output_dir: Path = MLRUNS_DIR
     mlflow_tracking_uri: Path = MLRUNS_DIR

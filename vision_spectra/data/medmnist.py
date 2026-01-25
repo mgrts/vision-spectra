@@ -113,14 +113,22 @@ class MedMNISTWrapper(Dataset):
         self,
         base_dataset,
         transform: transforms.Compose | None = None,
+        sample_indices: np.ndarray | None = None,
     ) -> None:
         self.base_dataset = base_dataset
         self.transform = transform
+        self.sample_indices = sample_indices
 
     def __len__(self) -> int:
+        if self.sample_indices is not None:
+            return len(self.sample_indices)
         return len(self.base_dataset)
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, int]:
+        # Map to actual index if subsampling
+        if self.sample_indices is not None:
+            idx = self.sample_indices[idx]
+
         image, label = self.base_dataset[idx]
 
         # MedMNIST returns numpy arrays
@@ -184,28 +192,50 @@ class MedMNISTDataset(BaseDataset):
         val_base = dataset_class(split="val", download=True, root=root)
         test_base = dataset_class(split="test", download=True, root=root)
 
-        self._train_dataset = MedMNISTWrapper(train_base, train_transform)
-        self._val_dataset = MedMNISTWrapper(val_base, eval_transform)
-        self._test_dataset = MedMNISTWrapper(test_base, eval_transform)
-
-        # Compute class counts
+        # Get labels for class counts and stratified sampling
         train_labels = train_base.labels.squeeze()
         val_labels = val_base.labels.squeeze()
         test_labels = test_base.labels.squeeze()
 
+        # Apply stratified sampling if sample_ratio < 1.0
+        sample_ratio = self.config.sample_ratio
+        train_indices = None
+        val_indices = None
+        test_indices = None
+
+        if sample_ratio < 1.0:
+            train_indices = self._get_stratified_indices(train_labels, sample_ratio)
+            val_indices = self._get_stratified_indices(val_labels, sample_ratio)
+            test_indices = self._get_stratified_indices(test_labels, sample_ratio)
+
+            # Update labels for correct class counts
+            train_labels = train_labels[train_indices]
+            val_labels = val_labels[val_indices]
+            test_labels = test_labels[test_indices]
+
+        self._train_dataset = MedMNISTWrapper(train_base, train_transform, train_indices)
+        self._val_dataset = MedMNISTWrapper(val_base, eval_transform, val_indices)
+        self._test_dataset = MedMNISTWrapper(test_base, eval_transform, test_indices)
+
+        # Compute class counts (on sampled data if applicable)
         num_classes = self.dataset_info["num_classes"]
         train_counts = np.bincount(train_labels, minlength=num_classes)
         val_counts = np.bincount(val_labels, minlength=num_classes)
         test_counts = np.bincount(test_labels, minlength=num_classes)
+
+        # Sizes reflect sampled data
+        train_size = len(train_indices) if train_indices is not None else len(train_base)
+        val_size = len(val_indices) if val_indices is not None else len(val_base)
+        test_size = len(test_indices) if test_indices is not None else len(test_base)
 
         self._info = DatasetInfo(
             name=self.config.name.value,
             num_classes=num_classes,
             num_channels=num_channels,
             image_size=(image_size, image_size),
-            train_size=len(train_base),
-            val_size=len(val_base),
-            test_size=len(test_base),
+            train_size=train_size,
+            val_size=val_size,
+            test_size=test_size,
             class_names=self.dataset_info["class_names"],
             class_counts={
                 "train": train_counts,
@@ -213,6 +243,29 @@ class MedMNISTDataset(BaseDataset):
                 "test": test_counts,
             },
         )
+
+    def _get_stratified_indices(self, labels: np.ndarray, sample_ratio: float) -> np.ndarray:
+        """
+        Get stratified sample indices preserving class distribution.
+
+        Args:
+            labels: Array of class labels
+            sample_ratio: Fraction of data to sample (0, 1]
+
+        Returns:
+            Array of selected indices
+        """
+        unique_classes = np.unique(labels)
+        selected_indices = []
+
+        for cls in unique_classes:
+            cls_indices = np.where(labels == cls)[0]
+            n_samples = max(1, int(len(cls_indices) * sample_ratio))
+            # Use random sampling (seed should be set externally for reproducibility)
+            sampled = np.random.choice(cls_indices, size=n_samples, replace=False)
+            selected_indices.extend(sampled)
+
+        return np.array(sorted(selected_indices))
 
     def get_train_dataset(self) -> Dataset:
         assert self._train_dataset is not None

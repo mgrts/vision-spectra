@@ -27,6 +27,7 @@ from torch.utils.data import DataLoader
 
 from vision_spectra.metrics.extraction import extract_all_weights
 from vision_spectra.metrics.spectral import (
+    EpochSpectralSnapshot,
     SpectralTracker,
     aggregate_spectral_metrics,
     get_spectral_metrics,
@@ -81,12 +82,15 @@ class BaseTrainer(ABC):
         self.best_val_metric = float("inf")  # Assume lower is better
         self.patience_counter = 0
 
-        # Output directory
-        self.run_dir = config.get_run_dir()
-        self.checkpoint_dir = self.run_dir / "checkpoints"
-        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
-        self.artifacts_dir = self.run_dir / "artifacts"
+        # Use a temporary directory for artifacts that will be logged to mlflow
+        # This eliminates the need for a persistent 'runs' directory
+        import tempfile
+
+        self._temp_dir = tempfile.mkdtemp(prefix=f"vision_spectra_{config.name}_")
+        self.artifacts_dir = Path(self._temp_dir) / "artifacts"
         self.artifacts_dir.mkdir(parents=True, exist_ok=True)
+        self.checkpoint_dir = Path(self._temp_dir) / "checkpoints"
+        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
         # Spectral distribution tracker
         self.spectral_tracker: SpectralTracker | None = None
@@ -202,8 +206,8 @@ class BaseTrainer(ABC):
         logger.info(f"Device: {self.device}")
         logger.info(f"Mixed precision: {self.use_amp}")
 
-        # Setup MLflow
-        mlflow.set_tracking_uri(str(self.config.output_dir.parent / "mlruns"))
+        # Setup MLflow - use the output_dir directly as mlruns location
+        mlflow.set_tracking_uri(str(self.config.output_dir))
         mlflow.set_experiment(self.config.name)
 
         with mlflow.start_run():
@@ -212,8 +216,28 @@ class BaseTrainer(ABC):
 
             best_checkpoint = None
 
+            # Log spectral metrics BEFORE training (epoch -1 represents pre-training state)
+            if self.config.spectral.enabled:
+                logger.info("Logging pre-training spectral metrics (before any training)...")
+                self.current_epoch = 0  # Use epoch 0 for pre-training metrics
+                spectral_metrics = self._compute_spectral_metrics()
+                # Log with step=-1 to clearly indicate pre-training
+                for k, v in spectral_metrics.items():
+                    if np.isfinite(v):
+                        mlflow.log_metric(f"spectral/{k}", v, step=0)
+
+                # Save spectral distributions and plots for pre-training state
+                if self.spectral_tracker is not None:
+                    self.model.eval()
+                    snapshot = self.spectral_tracker.record_epoch(self.model, epoch=0)
+                    self._save_epoch_spectral_artifacts(snapshot, epoch=0)
+                    logger.info(
+                        f"Saved pre-training spectral artifacts "
+                        f"({len(snapshot.distributions)} layers)"
+                    )
+
             for epoch in range(self.config.training.epochs):
-                self.current_epoch = epoch
+                self.current_epoch = epoch + 1  # Shift by 1 since 0 is pre-training
 
                 # Train
                 train_metrics = self.train_epoch()
@@ -221,21 +245,22 @@ class BaseTrainer(ABC):
                 # Validate
                 val_metrics = self.validate()
 
-                # Log metrics
+                # Log metrics (use epoch+1 for step to account for pre-training at step 0)
                 self._log_metrics(train_metrics, prefix="train")
                 self._log_metrics(val_metrics, prefix="val")
 
                 # Log spectral metrics
-                if self._should_log_spectral(epoch):
+                if self._should_log_spectral(epoch + 1):
                     spectral_metrics = self._compute_spectral_metrics()
                     self._log_metrics(spectral_metrics, prefix="spectral")
 
-                    # Track spectral distributions
+                    # Track spectral distributions and save artifacts
                     if self.spectral_tracker is not None:
                         self.model.eval()
-                        snapshot = self.spectral_tracker.record_epoch(self.model, epoch)
-                        logger.debug(
-                            f"Recorded spectral snapshot for epoch {epoch} "
+                        snapshot = self.spectral_tracker.record_epoch(self.model, epoch + 1)
+                        self._save_epoch_spectral_artifacts(snapshot, epoch + 1)
+                        logger.info(
+                            f"Saved spectral artifacts for epoch {epoch + 1} "
                             f"({len(snapshot.distributions)} layers)"
                         )
 
@@ -328,13 +353,32 @@ class BaseTrainer(ABC):
             }
 
     def _should_log_spectral(self, epoch: int) -> bool:
-        """Check if spectral metrics should be logged this epoch."""
+        """
+        Check if spectral metrics should be logged this epoch.
+
+        Epoch numbering:
+            - epoch 0: pre-training (logged separately, not via this method)
+            - epoch 1+: after training epochs
+
+        Args:
+            epoch: Current training epoch (1-based, where 1 = after first training epoch)
+
+        Returns:
+            True if spectral metrics should be logged for this epoch
+        """
         if not self.config.spectral.enabled:
             return False
+
+        # Log first 5 training epochs (1-5) if enabled, to capture initial training dynamics
+        # This is in addition to the pre-training state (epoch 0) logged separately
+        if self.config.spectral.log_first_epochs and 1 <= epoch <= 5:
+            return True
+
         return epoch % self.config.spectral.log_every_n_epochs == 0
 
     def _compute_spectral_metrics(self) -> dict[str, float]:
         """Compute spectral metrics for configured layers."""
+
         self.model.eval()
 
         weights = extract_all_weights(
@@ -406,6 +450,122 @@ class BaseTrainer(ABC):
         except Exception as e:
             logger.warning(f"Failed to save prediction examples: {e}")
 
+    def _save_epoch_spectral_artifacts(self, snapshot: EpochSpectralSnapshot, epoch: int) -> None:
+        """
+        Save spectral data as JSON and histogram plots for a single epoch.
+
+        Directory structure:
+            spectral/
+                json/
+                    spectral_epoch_0000.json
+                    spectral_epoch_0001.json
+                    ...
+                plots/
+                    epoch_0000/
+                        layer_name_1.png
+                        layer_name_2.png
+                        ...
+                    epoch_0001/
+                        ...
+
+        Args:
+            snapshot: The spectral snapshot for this epoch
+            epoch: Current epoch number
+        """
+        import json
+
+        import matplotlib.pyplot as plt
+
+        try:
+            # Create organized directory structure
+            spectral_dir = self.artifacts_dir / "spectral"
+            json_dir = spectral_dir / "json"
+            plots_dir = spectral_dir / "plots" / f"epoch_{epoch:04d}"
+
+            json_dir.mkdir(parents=True, exist_ok=True)
+            plots_dir.mkdir(parents=True, exist_ok=True)
+
+            # Save spectral values as JSON for this epoch
+            epoch_data = {
+                "epoch": epoch,
+                "timestamp": snapshot.timestamp,
+                "aggregated_metrics": snapshot.aggregated_metrics,
+                "distributions": [],
+            }
+
+            for dist in snapshot.distributions:
+                epoch_data["distributions"].append(
+                    {
+                        "name": dist.name,
+                        "matrix_type": dist.matrix_type,
+                        "singular_values": dist.singular_values.tolist(),
+                        "metrics": dist.metrics,
+                    }
+                )
+
+            # Save JSON file in json/ subdirectory
+            json_path = json_dir / f"spectral_epoch_{epoch:04d}.json"
+            with open(json_path, "w") as f:
+                json.dump(epoch_data, f, indent=2)
+            mlflow.log_artifact(str(json_path), artifact_path="spectral/json")
+            logger.debug(f"Saved spectral JSON for epoch {epoch}: {json_path}")
+
+            # Create and save histogram plots for each layer in plots/epoch_XXXX/
+            for dist in snapshot.distributions:
+                safe_name = dist.name.replace(".", "_").replace("/", "_")
+                fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+
+                # Plot 1: Singular value distribution (log scale)
+                ax1 = axes[0]
+                sv = dist.singular_values
+                ax1.bar(range(len(sv)), sv, color="steelblue", alpha=0.7)
+                ax1.set_xlabel("Index")
+                ax1.set_ylabel("Singular Value")
+                ax1.set_title(f"Singular Values: {dist.name}")
+                ax1.set_yscale("log")
+
+                # Plot 2: Histogram of singular values
+                ax2 = axes[1]
+                ax2.hist(sv, bins=30, color="steelblue", alpha=0.7, edgecolor="black")
+                ax2.set_xlabel("Singular Value")
+                ax2.set_ylabel("Frequency")
+                ax2.set_title(f"SV Histogram: {dist.name}")
+
+                # Add metrics as text
+                metrics_text = "\n".join(
+                    [f"{k}: {v:.4f}" for k, v in list(dist.metrics.items())[:5]]
+                )
+                fig.text(
+                    0.02,
+                    0.02,
+                    metrics_text,
+                    fontsize=8,
+                    verticalalignment="bottom",
+                    family="monospace",
+                )
+
+                plt.tight_layout()
+
+                # Save plot in plots/epoch_XXXX/ subdirectory
+                plot_path = plots_dir / f"{safe_name}.png"
+                plt.savefig(plot_path, dpi=100, bbox_inches="tight")
+                plt.close(fig)
+
+                mlflow.log_artifact(
+                    str(plot_path), artifact_path=f"spectral/plots/epoch_{epoch:04d}"
+                )
+
+            logger.info(
+                f"Saved spectral artifacts for epoch {epoch}: "
+                f"1 JSON + {len(snapshot.distributions)} plots"
+            )
+
+        except Exception as e:
+            logger.warning(f"Failed to save epoch spectral artifacts: {e}")
+            import traceback
+
+            traceback.print_exc()
+
     def _log_metrics(self, metrics: dict[str, float], prefix: str = "") -> None:
         """Log metrics to MLflow."""
         for k, v in metrics.items():
@@ -456,6 +616,7 @@ class BaseTrainer(ABC):
         clears CUDA cache, and removes references to large objects.
         """
         import gc
+        import shutil
 
         # Move model to CPU to free GPU memory
         if hasattr(self, "model") and self.model is not None:
@@ -491,6 +652,15 @@ class BaseTrainer(ABC):
         if hasattr(self, "val_loader"):
             del self.val_loader
             self.val_loader = None
+
+        # Clean up temporary directory
+        if hasattr(self, "_temp_dir") and self._temp_dir is not None:
+            try:
+                shutil.rmtree(self._temp_dir)
+                logger.debug(f"Cleaned up temp directory: {self._temp_dir}")
+            except Exception as e:
+                logger.warning(f"Failed to clean up temp directory: {e}")
+            self._temp_dir = None
 
         # Force garbage collection
         gc.collect()

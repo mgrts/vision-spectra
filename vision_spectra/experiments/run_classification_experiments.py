@@ -13,31 +13,37 @@ Key features:
 - MLflow tracking for all experiments
 
 Usage:
-    poetry run python -m vision_spectra.experiments.run_classification_experiments
+    poetry run vision-spectra experiments run-classification
 
     # Or with custom options:
-    poetry run python -m vision_spectra.experiments.run_classification_experiments --dataset bloodmnist --seeds 3
+    poetry run vision-spectra experiments run-classification --dataset bloodmnist --num-seeds 3
+
+    # Direct module execution:
+    poetry run python -m vision_spectra.experiments.run_classification_experiments --help
 """
 
 from __future__ import annotations
 
-import argparse
 import contextlib
 import json
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
 
 import mlflow
+import typer
 from loguru import logger
+from rich.console import Console
+from rich.table import Table
 
 from vision_spectra.data import get_dataset
 from vision_spectra.losses import get_loss
 from vision_spectra.models import create_vit_classifier
 from vision_spectra.settings import (
     DATA_DIR,
-    RUNS_DIR,
+    MLRUNS_DIR,
     DatasetConfig,
     DatasetName,
     ExperimentConfig,
@@ -50,6 +56,56 @@ from vision_spectra.settings import (
     set_seed,
 )
 from vision_spectra.training import ClassificationTrainer
+
+# =============================================================================
+# CLI App
+# =============================================================================
+
+app = typer.Typer(
+    name="experiments",
+    help="Run systematic experiments for comparing loss functions.",
+    no_args_is_help=True,
+    pretty_exceptions_show_locals=False,
+)
+
+console = Console()
+
+
+# =============================================================================
+# Enums for CLI
+# =============================================================================
+
+
+class DeviceChoice(str, Enum):
+    """Device options for training."""
+
+    AUTO = "auto"
+    CPU = "cpu"
+    CUDA = "cuda"
+    MPS = "mps"
+
+
+class LossChoice(str, Enum):
+    """Available loss functions."""
+
+    CROSS_ENTROPY = "cross_entropy"
+    FOCAL = "focal"
+    LABEL_SMOOTHING = "label_smoothing"
+    CLASS_BALANCED = "class_balanced"
+    ASYMMETRIC = "asymmetric"
+
+
+# Default loss functions for experiments
+DEFAULT_LOSSES: list[str] = [
+    "cross_entropy",
+    "focal",
+    "label_smoothing",
+    "class_balanced",
+    "asymmetric",
+]
+
+# Default seeds for reproducibility
+DEFAULT_SEEDS: list[int] = [42, 123, 456, 789, 1024]
 
 
 @dataclass
@@ -99,11 +155,26 @@ class ExperimentConfig_:
     learning_rate: float = 1e-4
     early_stopping_patience: int = 10
 
+    # Dataset sampling (for faster experiments)
+    sample_ratio: float = 1.0
+
+    # Device settings
+    device: str = "auto"
+
+    # Fast mode - disables spectral tracking to save memory
+    fast_mode: bool = False
+
+    # Spectral logging settings
+    log_every_n_epochs: int = 5
+    log_first_epochs: bool = True  # Log first 5 epochs (0-4) for initial dynamics
+    track_distributions: bool = True  # Track full singular value distributions
+    save_distribution_history: bool = True  # Save distribution history to JSON
+
     # Model settings
     model_name: str = "vit_tiny_patch16_224"
 
-    # Output - use standard runs directory
-    output_dir: Path = field(default_factory=lambda: RUNS_DIR)
+    # Output - use mlruns directory for all experiment tracking
+    output_dir: Path = field(default_factory=lambda: MLRUNS_DIR)
     experiment_name: str = "classification_loss_comparison"
 
 
@@ -149,12 +220,13 @@ def run_single_experiment(
         exp_config = ExperimentConfig(
             name=experiment_id,
             seed=seed,
-            device="auto",
+            device=config.device,
             output_dir=config.output_dir,
             data_dir=DATA_DIR,
             dataset=DatasetConfig(
                 name=DatasetName(dataset_name),
                 batch_size=config.batch_size,
+                sample_ratio=config.sample_ratio,
             ),
             model=ModelConfig(
                 name=config.model_name,
@@ -176,8 +248,12 @@ def run_single_experiment(
                 save_every_n_epochs=10,
             ),
             spectral=SpectralConfig(
-                enabled=True,
-                log_every_n_epochs=5,
+                enabled=not config.fast_mode,
+                log_every_n_epochs=config.log_every_n_epochs,
+                log_first_epochs=config.log_first_epochs,
+                track_distributions=config.track_distributions and not config.fast_mode,
+                save_distribution_history=config.save_distribution_history
+                and not config.fast_mode,
             ),
         )
 
@@ -333,6 +409,9 @@ def run_all_experiments(config: ExperimentConfig_) -> list[ExperimentResult]:
     logger.info(
         f"Max epochs: {config.epochs}, Early stopping patience: {config.early_stopping_patience}"
     )
+    if config.sample_ratio < 1.0:
+        logger.info(f"Dataset sampling: {config.sample_ratio * 100:.0f}% of data")
+    logger.info(f"Device: {config.device}")
 
     for loss_name in config.losses:
         for seed in config.seeds:
@@ -397,126 +476,223 @@ def save_results(results: list[ExperimentResult], output_path: Path) -> None:
 
 
 def print_summary(results: list[ExperimentResult]) -> None:
-    """Print a summary of all experiment results."""
-    print("\n" + "=" * 80)
-    print("EXPERIMENT SUMMARY")
-    print("=" * 80)
-
-    # Group by loss function
+    """Print a summary of all experiment results using Rich tables."""
     from collections import defaultdict
 
+    import numpy as np
+
+    console.print("\n")
+    console.rule("[bold blue]EXPERIMENT SUMMARY[/bold blue]")
+
+    # Group by loss function
     by_loss: dict[str, list[ExperimentResult]] = defaultdict(list)
     for r in results:
         if r.success:
             by_loss[r.loss].append(r)
 
-    print(
-        f"\n{'Loss Function':<20} {'AUROC (mean±std)':<20} {'Accuracy (mean±std)':<22} {'F1 (mean±std)':<20} {'Runs':<6}"
+    # Create summary table
+    table = Table(
+        title="Results by Loss Function",
+        show_header=True,
+        header_style="bold magenta",
     )
-    print("-" * 90)
+    table.add_column("Loss Function", style="cyan", no_wrap=True)
+    table.add_column("AUROC (mean±std)", justify="right")
+    table.add_column("Accuracy (mean±std)", justify="right")
+    table.add_column("F1 (mean±std)", justify="right")
+    table.add_column("Runs", justify="center")
 
     for loss_name in sorted(by_loss.keys()):
         loss_results = by_loss[loss_name]
 
         if loss_results:
-            import numpy as np
-
             aurocs = [r.best_val_auroc for r in loss_results]
             accs = [r.best_val_accuracy for r in loss_results]
             f1s = [r.best_val_f1 for r in loss_results]
 
-            auroc_mean, auroc_std = np.mean(aurocs), np.std(aurocs)
-            acc_mean, acc_std = np.mean(accs), np.std(accs)
-            f1_mean, f1_std = np.mean(f1s), np.std(f1s)
+            auroc_mean, auroc_std = float(np.mean(aurocs)), float(np.std(aurocs))
+            acc_mean, acc_std = float(np.mean(accs)), float(np.std(accs))
+            f1_mean, f1_std = float(np.mean(f1s)), float(np.std(f1s))
 
-            print(
-                f"{loss_name:<20} "
-                f"{auroc_mean:.4f} ± {auroc_std:.4f}   "
-                f"{acc_mean:.4f} ± {acc_std:.4f}     "
-                f"{f1_mean:.4f} ± {f1_std:.4f}   "
-                f"{len(loss_results):<6}"
+            table.add_row(
+                loss_name,
+                f"{auroc_mean:.4f} ± {auroc_std:.4f}",
+                f"{acc_mean:.4f} ± {acc_std:.4f}",
+                f"{f1_mean:.4f} ± {f1_std:.4f}",
+                str(len(loss_results)),
             )
+
+    console.print(table)
 
     # Failed experiments
     failed = [r for r in results if not r.success]
     if failed:
-        print(f"\nFailed experiments: {len(failed)}")
+        console.print(f"\n[red]Failed experiments: {len(failed)}[/red]")
         for r in failed:
-            print(f"  - {r.dataset}_{r.loss}_seed{r.seed}: {r.error_message}")
+            console.print(f"  [red]• {r.dataset}_{r.loss}_seed{r.seed}: {r.error_message}[/red]")
 
-    print("\n" + "=" * 80)
+    console.rule()
 
 
-def main():
-    """Main entry point."""
-    parser = argparse.ArgumentParser(
-        description="Run classification experiments with multiple loss functions"
-    )
-    parser.add_argument(
-        "--dataset", "-d", type=str, default="pathmnist", help="Dataset name (default: pathmnist)"
-    )
-    parser.add_argument(
+@app.command("run")
+def run_classification(
+    dataset: str = typer.Option(
+        "pathmnist",
+        "--dataset",
+        "-d",
+        help="Dataset name to use for experiments.",
+    ),
+    losses: list[str] | None = typer.Option(
+        None,
         "--losses",
         "-l",
-        type=str,
-        nargs="+",
-        default=None,
-        help="Loss functions to compare (default: all)",
-    )
-    parser.add_argument(
+        help="Loss functions to compare. If not specified, all available losses are used.",
+    ),
+    seeds: list[int] | None = typer.Option(
+        None,
         "--seeds",
         "-s",
-        type=int,
-        nargs="+",
-        default=None,
-        help="Seeds to use (default: 42, 123, 456, 789, 1024)",
-    )
-    parser.add_argument(
+        help="Specific seeds to use for reproducibility.",
+    ),
+    num_seeds: int = typer.Option(
+        5,
         "--num-seeds",
         "-n",
-        type=int,
-        default=5,
-        help="Number of seeds to use if --seeds not specified (default: 5)",
-    )
-    parser.add_argument(
-        "--epochs", "-e", type=int, default=50, help="Maximum epochs (default: 50)"
-    )
-    parser.add_argument(
-        "--patience", "-p", type=int, default=10, help="Early stopping patience (default: 10)"
-    )
-    parser.add_argument(
-        "--batch-size", "-b", type=int, default=64, help="Batch size (default: 64)"
-    )
-    parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate (default: 1e-4)")
-    parser.add_argument(
-        "--output", "-o", type=str, default=None, help="Output directory for results"
-    )
+        help="Number of seeds to generate if --seeds not specified.",
+    ),
+    epochs: int = typer.Option(
+        50,
+        "--epochs",
+        "-e",
+        help="Maximum number of training epochs.",
+    ),
+    patience: int = typer.Option(
+        10,
+        "--patience",
+        "-p",
+        help="Early stopping patience.",
+    ),
+    batch_size: int = typer.Option(
+        64,
+        "--batch-size",
+        "-b",
+        help="Training batch size.",
+    ),
+    lr: float = typer.Option(
+        1e-4,
+        "--lr",
+        help="Learning rate.",
+    ),
+    sample_ratio: float = typer.Option(
+        1.0,
+        "--sample-ratio",
+        "-r",
+        min=0.01,
+        max=1.0,
+        help="Fraction of dataset to use (0.01-1.0). Use <1 for faster experiments.",
+    ),
+    device: DeviceChoice = typer.Option(
+        DeviceChoice.AUTO,
+        "--device",
+        help="Device to use for training.",
+    ),
+    output_dir: Path | None = typer.Option(
+        None,
+        "--output",
+        "-o",
+        help="Output directory for results. Defaults to runs/.",
+    ),
+    fast: bool = typer.Option(
+        False,
+        "--fast",
+        "-f",
+        help="Fast mode: disable spectral tracking to save memory.",
+    ),
+    log_every_n_epochs: int = typer.Option(
+        5,
+        "--log-every-n-epochs",
+        help="Log spectral metrics every N epochs.",
+    ),
+    log_first_epochs: bool = typer.Option(
+        True,
+        "--log-first-epochs/--no-log-first-epochs",
+        help="Log spectral metrics for first 5 epochs (0-4) to capture initial dynamics.",
+    ),
+    track_distributions: bool = typer.Option(
+        True,
+        "--track-distributions/--no-track-distributions",
+        help="Track full singular value distributions as JSON arrays.",
+    ),
+    save_distribution_history: bool = typer.Option(
+        True,
+        "--save-distribution-history/--no-save-distribution-history",
+        help="Save spectral distribution history to JSON and generate histogram plots.",
+    ),
+) -> None:
+    """
+    Run classification experiments with multiple loss functions and seeds.
 
-    args = parser.parse_args()
+    This command systematically compares different loss functions for image
+    classification and analyzes their effects on transformer weight spectra.
+
+    Examples:
+        # Run with default settings
+        poetry run vision-spectra experiments run
+
+        # Use 50% of data with 2 seeds on CPU
+        poetry run vision-spectra experiments run --sample-ratio 0.5 --num-seeds 2 --device cpu
+
+        # Compare specific losses
+        poetry run vision-spectra experiments run --losses cross_entropy focal --num-seeds 3
+    """
+    # Resolve output directory
+    resolved_output_dir = output_dir if output_dir is not None else MLRUNS_DIR
+
+    # Determine which losses to use
+    resolved_losses = list(losses) if losses else DEFAULT_LOSSES
+
+    # Determine seeds
+    if seeds:
+        resolved_seeds = list(seeds)
+    elif num_seeds != 5:
+        resolved_seeds = [42 + i * 100 for i in range(num_seeds)]
+    else:
+        resolved_seeds = DEFAULT_SEEDS
 
     # Create config
     config = ExperimentConfig_(
-        dataset=args.dataset,
-        epochs=args.epochs,
-        batch_size=args.batch_size,
-        learning_rate=args.lr,
-        early_stopping_patience=args.patience,
+        dataset=dataset,
+        losses=resolved_losses,
+        seeds=resolved_seeds,
+        epochs=epochs,
+        batch_size=batch_size,
+        learning_rate=lr,
+        early_stopping_patience=patience,
+        sample_ratio=sample_ratio,
+        device=device.value,
+        fast_mode=fast,
+        log_every_n_epochs=log_every_n_epochs,
+        log_first_epochs=log_first_epochs,
+        track_distributions=track_distributions,
+        save_distribution_history=save_distribution_history,
+        output_dir=resolved_output_dir,
     )
-
-    if args.losses:
-        config.losses = args.losses
-
-    if args.seeds:
-        config.seeds = args.seeds
-    elif args.num_seeds != 5:
-        # Generate seeds
-        config.seeds = [42 + i * 100 for i in range(args.num_seeds)]
-
-    if args.output:
-        config.output_dir = Path(args.output)
 
     # Create output directory
     config.output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Display configuration
+    console.print("\n[bold blue]Classification Experiments[/bold blue]")
+    console.print(f"  Dataset: [cyan]{config.dataset}[/cyan]")
+    console.print(f"  Losses: [cyan]{', '.join(config.losses)}[/cyan]")
+    console.print(f"  Seeds: [cyan]{config.seeds}[/cyan]")
+    console.print(f"  Device: [cyan]{config.device}[/cyan]")
+    if config.sample_ratio < 1.0:
+        console.print(f"  Sample ratio: [yellow]{config.sample_ratio * 100:.0f}%[/yellow]")
+    if config.fast_mode:
+        console.print("  Mode: [yellow]Fast (spectral tracking disabled)[/yellow]")
+    console.print(f"  Output: [cyan]{config.output_dir}[/cyan]")
+    console.print()
 
     # Run experiments
     logger.info("Starting classification experiments")
@@ -531,11 +707,36 @@ def main():
     print_summary(results)
 
     # Print MLflow instructions
-    print("\nTo view detailed results:")
-    print(f"  cd {RUNS_DIR.parent}")
-    print("  poetry run mlflow ui")
-    print("\nThen open http://localhost:5000 in your browser")
+    console.print("\n[bold]To view detailed results:[/bold]")
+    console.print(f"  cd {MLRUNS_DIR.parent}")
+    console.print("  poetry run mlflow ui")
+    console.print(
+        "\nThen open [link=http://localhost:5000]http://localhost:5000[/link] in your browser"
+    )
+
+
+@app.command("list-losses")
+def list_losses() -> None:
+    """List all available loss functions for experiments."""
+    console.print("\n[bold]Available Loss Functions:[/bold]\n")
+
+    loss_descriptions = {
+        "cross_entropy": "Standard cross-entropy loss for multi-class classification",
+        "focal": "Focal loss that down-weights easy examples (gamma=2.0)",
+        "label_smoothing": "Cross-entropy with soft labels (epsilon=0.1)",
+        "class_balanced": "Re-weighted loss based on effective number of samples",
+        "asymmetric": "Asymmetric loss for handling positive/negative imbalance",
+    }
+
+    table = Table(show_header=True, header_style="bold magenta")
+    table.add_column("Loss Name", style="cyan")
+    table.add_column("Description")
+
+    for loss_name in DEFAULT_LOSSES:
+        table.add_row(loss_name, loss_descriptions.get(loss_name, ""))
+
+    console.print(table)
 
 
 if __name__ == "__main__":
-    main()
+    app()

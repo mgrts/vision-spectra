@@ -21,6 +21,7 @@ The spectral properties of neural network weight matrices—such as spectral ent
 | Finetuning | `vision-spectra finetune` | Finetune a pretrained model |
 | Multitask Learning | `vision-spectra train-mtl` | Joint classification + MIM |
 | Evaluation | `vision-spectra eval` | Evaluate a trained model |
+| **Experiments** | `vision-spectra experiments run` | Systematic loss function comparison |
 
 ## Quick Start
 
@@ -76,6 +77,221 @@ vision-spectra train-mtl --dataset pathmnist --cls-weight 1.0 --mim-weight 0.5 -
 # Quick smoke test (for CI)
 vision-spectra train-cls --dataset synthetic --epochs 2 --smoke-test
 ```
+
+## Running Experiments
+
+This project provides two experiment modules for systematic analysis of how loss functions affect transformer weight spectra.
+
+---
+
+### Classification Experiments (Real-World Data)
+
+The classification experiments module compares different loss functions on real-world medical imaging datasets (MedMNIST) with multiple seeds for statistical reliability.
+
+#### Classification Quick Start
+
+```bash
+# Run full experiment suite (all losses, 5 seeds each)
+poetry run vision-spectra experiments run
+
+# Or via direct module execution
+poetry run python -m vision_spectra.experiments.run_classification_experiments run
+
+# View help for all options
+poetry run vision-spectra experiments run --help
+```
+
+#### Classification Usage Examples
+
+```bash
+# Quick test: 10% of data, 2 seeds, CPU (recommended for first run)
+poetry run vision-spectra experiments run \
+    --dataset pathmnist \
+    --sample-ratio 0.1 \
+    --num-seeds 2 \
+    --device cpu
+
+# Compare specific losses only
+poetry run vision-spectra experiments run \
+    --losses cross_entropy focal label_smoothing \
+    --num-seeds 3
+
+# Fast mode: disable spectral tracking for speed
+poetry run vision-spectra experiments run --fast --num-seeds 2
+
+# Full experiment with custom settings
+poetry run vision-spectra experiments run \
+    --dataset pathmnist \
+    --losses cross_entropy focal \
+    --epochs 30 \
+    --batch-size 32 \
+    --lr 1e-4 \
+    --log-every-n-epochs 3
+
+# List available loss functions
+poetry run vision-spectra experiments list-losses
+```
+
+#### Classification Experiment Options
+
+| Option | Short | Description | Default |
+|--------|-------|-------------|---------|
+| `--dataset` | `-d` | Dataset name (`pathmnist`, `bloodmnist`, etc.) | `pathmnist` |
+| `--losses` | `-l` | Loss functions to compare (space-separated) | all available |
+| `--seeds` | `-s` | Specific random seeds | `42, 123, 456, 789, 1024` |
+| `--num-seeds` | `-n` | Number of seeds (if `--seeds` not specified) | `5` |
+| `--epochs` | `-e` | Maximum training epochs | `50` |
+| `--patience` | `-p` | Early stopping patience (epochs without improvement) | `10` |
+| `--batch-size` | `-b` | Training batch size | `64` |
+| `--lr` | | Learning rate | `1e-4` |
+| `--sample-ratio` | `-r` | Fraction of dataset to use (0.01–1.0) | `1.0` |
+| `--device` | | Device: `auto`, `cpu`, `cuda`, `mps` | `auto` |
+| `--output` | `-o` | Output directory for MLflow artifacts | `mlruns/` |
+| `--fast` | `-f` | Fast mode (disable spectral tracking) | `false` |
+| `--log-every-n-epochs` | | Log spectral metrics every N epochs | `5` |
+| `--log-first-epochs` | | Log spectral metrics for epochs 0–4 | `true` |
+| `--track-distributions` | | Track full singular value arrays as JSON | `true` |
+| `--save-distribution-history` | | Save spectral history JSON and histogram plots | `true` |
+
+#### Available Loss Functions
+
+| Loss | Description |
+|------|-------------|
+| `cross_entropy` | Standard cross-entropy loss |
+| `focal` | Focal loss that down-weights easy examples (γ=2.0) |
+| `label_smoothing` | Cross-entropy with soft labels (ε=0.1) |
+| `class_balanced` | Re-weighted loss based on effective number of samples |
+| `asymmetric` | Asymmetric loss for handling class imbalance |
+
+---
+
+### Synthetic Data Experiments
+
+The synthetic experiments module tests spectral hypotheses on simple geometric shapes data. This is useful for validating that simpler data leads to less heavy-tailed weight spectra.
+
+**Hypothesis:** Simple synthetic data leads to less heavy-tailed weight spectra because models can learn patterns quickly without complex internal representations, resulting in more uniform singular value distributions.
+
+#### Synthetic Quick Start
+
+```bash
+# Run synthetic experiments with defaults (3 classes, 1000 samples)
+poetry run python -m vision_spectra.experiments.run_synthetic_experiments run
+
+# View help for all options
+poetry run python -m vision_spectra.experiments.run_synthetic_experiments run --help
+```
+
+#### Synthetic Usage Examples
+
+```bash
+# Very simple data: 2 classes, 500 samples
+poetry run python -m vision_spectra.experiments.run_synthetic_experiments run \
+    --num-classes 2 \
+    --num-samples 500 \
+    --epochs 20
+
+# More complex synthetic data
+poetry run python -m vision_spectra.experiments.run_synthetic_experiments run \
+    --num-classes 5 \
+    --num-samples 5000 \
+    --epochs 50 \
+    --num-seeds 5
+
+# Compare complexity levels (trivial/simple/medium)
+poetry run python -m vision_spectra.experiments.run_synthetic_experiments compare-complexity
+
+# Run on specific device
+poetry run python -m vision_spectra.experiments.run_synthetic_experiments run \
+    --device cpu \
+    --num-classes 3 \
+    --num-samples 1000
+
+# List available shapes
+poetry run python -m vision_spectra.experiments.run_synthetic_experiments list-shapes
+```
+
+#### Synthetic Experiment Options
+
+| Option | Short | Description | Default |
+|--------|-------|-------------|---------|
+| `--num-classes` | `-c` | Number of shape classes (2–5). Fewer = simpler | `3` |
+| `--num-samples` | `-n` | Number of training samples | `1000` |
+| `--losses` | `-l` | Loss functions to compare | `cross_entropy, focal, label_smoothing` |
+| `--seeds` | `-s` | Specific random seeds | auto-generated |
+| `--num-seeds` | | Number of seeds | `3` |
+| `--epochs` | `-e` | Maximum training epochs | `30` |
+| `--patience` | `-p` | Early stopping patience | `10` |
+| `--batch-size` | `-b` | Training batch size | `32` |
+| `--lr` | | Learning rate | `1e-4` |
+| `--device` | | Device: `auto`, `cpu`, `cuda`, `mps` | `auto` |
+| `--log-every-n-epochs` | | Spectral logging frequency | `2` |
+| `--output` | `-o` | Output directory | `mlruns/` |
+
+#### Complexity Comparison
+
+The `compare-complexity` command runs experiments at three complexity levels:
+
+| Level | Classes | Samples | Expected Spectral Behavior |
+|-------|---------|---------|---------------------------|
+| **TRIVIAL** | 2 | 500 | Most uniform SVD (less heavy-tailed) |
+| **SIMPLE** | 3 | 1,000 | Moderate tail weight |
+| **MEDIUM** | 5 | 5,000 | Heaviest tails (more complex representations) |
+
+```bash
+# Run complexity comparison
+poetry run python -m vision_spectra.experiments.run_synthetic_experiments compare-complexity \
+    --num-seeds 2 \
+    --epochs 30 \
+    --device auto
+```
+
+#### Shapes in Synthetic Data
+
+| Label | Shape | Description |
+|-------|-------|-------------|
+| 0 | Circle | Filled ellipse with random position/size |
+| 1 | Square | Filled rectangle with random position/size |
+| 2 | Triangle | Filled 3-point polygon (equilateral) |
+| 3 | Star | 5-pointed star with inner/outer vertices |
+| 4 | Cross | Two overlapping rectangles (plus sign) |
+
+**Image properties:**
+
+- Size: 28×28 pixels (resized to 224×224 for ViT)
+- Channels: 3 (RGB)
+- Background: Dark noise (RGB 20–60)
+- Shape color: Bright (RGB 150–255)
+
+---
+
+### Understanding Experiment Output
+
+All experiments are tracked in MLflow. After running experiments:
+
+```bash
+# Start MLflow UI to view results
+poetry run mlflow ui --backend-store-uri mlruns/
+
+# Open http://localhost:5000 in your browser
+```
+
+#### What's Logged in MLflow
+
+- **Metrics:** Accuracy, AUROC, F1-score, loss per epoch
+- **Spectral metrics:** Entropy, stable rank, alpha exponent (per epoch when tracked)
+- **Artifacts:**
+  - `spectral/epoch_N/values.json` — Full singular value arrays
+  - `spectral/epoch_N/histograms/*.png` — Distribution histograms
+  - Model checkpoints (best model)
+
+#### Recommended Experiment Workflow
+
+1. **Quick validation** — Use `--sample-ratio 0.1 --num-seeds 2` first
+2. **Full experiment** — Run with default settings once validated
+3. **Analyze in MLflow** — Compare spectral evolution across loss functions
+4. **Synthetic comparison** — Use synthetic experiments to validate hypotheses
+
+---
 
 ### Configuration
 
@@ -222,8 +438,7 @@ vision-spectra/
 ├── .pre-commit-config.yaml # Pre-commit hooks config
 ├── .github/                # GitHub Actions workflows
 │   └── workflows/
-│       ├── ci.yaml         # CI pipeline
-│       └── release.yaml    # Release pipeline
+│       └── ci.yaml         # CI pipeline (lint, test, type-check)
 ├── configs/                # Example configuration files
 │   └── example.yaml
 ├── data/                   # Downloaded datasets (gitignored)
@@ -235,8 +450,7 @@ vision-spectra/
 │   ├── settings.py         # Configuration models
 │   ├── experiments/        # Experiment scripts
 │   │   ├── __init__.py
-│   │   ├── run_classification_experiments.py
-│   │   └── run_loss_comparison.py
+│   │   └── run_classification_experiments.py
 │   ├── data/               # Dataset modules
 │   │   ├── __init__.py
 │   │   ├── base.py         # Dataset abstractions

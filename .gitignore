@@ -180,3 +180,5 @@ logs/
 .secrets
 *.key
 *.pem
+
+references/

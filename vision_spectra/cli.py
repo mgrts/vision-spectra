@@ -8,6 +8,7 @@ Provides commands for:
 - Multitask learning
 - Evaluation
 - Data management
+- Experiments (systematic loss function comparisons)
 """
 
 from __future__ import annotations
@@ -18,6 +19,9 @@ import typer
 from loguru import logger
 
 from vision_spectra import __version__
+from vision_spectra.experiments.run_classification_experiments import (
+    app as experiments_app,
+)
 
 app = typer.Typer(
     name="vision-spectra",
@@ -25,6 +29,9 @@ app = typer.Typer(
     no_args_is_help=True,
     pretty_exceptions_show_locals=False,
 )
+
+# Add experiments as a sub-command group
+app.add_typer(experiments_app, name="experiments")
 
 
 # =============================================================================
