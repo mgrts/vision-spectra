@@ -34,6 +34,10 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+import matplotlib
+
+matplotlib.use("Agg")  # Set backend before importing pyplot
+import matplotlib.pyplot as plt
 import mlflow
 import numpy as np
 import torch
@@ -331,11 +335,6 @@ def log_spectral_artifacts(
         histograms_dir.mkdir()
 
         try:
-            import matplotlib
-
-            matplotlib.use("Agg")
-            import matplotlib.pyplot as plt
-
             for layer_name, svs in analysis["singular_values"].items():
                 if not svs:
                     continue
@@ -425,10 +424,13 @@ def run_scenario_experiment(
                     seed=seed,
                 )
             else:
+                # Use num_workers=0 to avoid file descriptor exhaustion on macOS
+                # Spectral analysis creates many figures which can leak FDs
                 dataset_config = DatasetConfig(
                     name=DatasetName(config.dataset_name),
                     batch_size=config.batch_size,
                     sample_ratio=1.0 if config.num_samples is None else 0.5,
+                    num_workers=0,  # Disable multiprocessing to prevent FD leaks
                 )
                 dataset_obj = get_dataset(dataset_config, data_dir=DATA_DIR)
                 train_loader = dataset_obj.get_train_loader()
@@ -558,11 +560,25 @@ def run_scenario_experiment(
 
             training_time = time.time() - start_time
 
-            # Cleanup
+            # Comprehensive cleanup to prevent resource leaks
+            # Clean up DataLoaders first (releases multiprocessing workers)
+            cleanup_dataloaders(train_loader, val_loader)
+
+            # Clean up matplotlib to release figure file handles
+            cleanup_matplotlib()
+
+            # Clean up model and tensors
             del model
+            del train_loader
+            del val_loader
+            if "dataset_obj" in locals():
+                del dataset_obj
+
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+            if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                torch.mps.empty_cache()
 
             return ScenarioResult(
                 scenario=config.scenario,
@@ -580,6 +596,14 @@ def run_scenario_experiment(
         import traceback
 
         traceback.print_exc()
+
+        # Cleanup on error to prevent resource leaks
+        cleanup_matplotlib()
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            torch.mps.empty_cache()
 
         return ScenarioResult(
             scenario=config.scenario,
@@ -852,6 +876,33 @@ def _print_scenario_summary(results: list[ScenarioResult]) -> None:
         )
 
     console.print(table)
+
+
+def cleanup_dataloaders(*loaders: Any) -> None:
+    """
+    Properly cleanup DataLoaders to release file descriptors.
+
+    This is important on macOS which has a low default file descriptor limit.
+    DataLoaders with num_workers > 0 spawn subprocesses that hold file descriptors.
+    """
+    import contextlib
+
+    for loader in loaders:
+        if loader is None:
+            continue
+        # Try to cleanup any iterator state
+        if hasattr(loader, "_iterator") and loader._iterator is not None:
+            with contextlib.suppress(Exception):
+                loader._iterator._shutdown_workers()
+            loader._iterator = None
+
+    # Force garbage collection to clean up worker processes
+    gc.collect()
+
+
+def cleanup_matplotlib() -> None:
+    """Clean up matplotlib to release figure file handles."""
+    plt.close("all")
 
 
 if __name__ == "__main__":
