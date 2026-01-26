@@ -84,50 +84,51 @@ This project provides experiment modules for systematic analysis of how loss fun
 
 ---
 
-### Core Three-Scenario Experiment Framework
+### Core Four-Scenario Experiment Framework
 
-The research is structured around three key scenarios that test the relationship between network expressivity, data complexity, and spectral properties:
+The research is structured around four key scenarios that test the relationship between network expressivity, data complexity, and spectral properties:
 
 | Scenario | ID | Network | Data | Expected α | Expected r_s | Purpose |
 |----------|----|---------|------|------------|--------------|---------|
 | **A: Expressive + Simple** | `EXP_A` | ViT-Tiny (full) | Synthetic shapes (3 classes, 1K samples) | Low (~1-2) | High | Baseline: no compression needed |
 | **B: Expressive + Complex** | `EXP_B` | ViT-Tiny (full) | PathMNIST (9 classes, 89K samples) | High (~3-5) | Low | Main: compression regime |
 | **C: Reduced + Complex** | `EXP_C` | ViT-Tiny (narrow) | PathMNIST (9 classes, 89K samples) | Low (~1-2) | Medium-High | Control: insufficient capacity |
+| **D: Reduced + Simple** | `EXP_D` | ViT-Tiny (narrow) | Synthetic shapes (3 classes, 1K samples) | Low (~1-2) | High | Control: simple data + reduced capacity |
 
 **Hypothesis:** Heavy-tailed spectra emerge when an expressive network must compress complex data, while simpler data or reduced capacity leads to more uniform singular value distributions.
 
-#### Running the Three Scenarios
+#### Running the Four Scenarios
 
 ```bash
-# Scenario A: Expressive + Simple (synthetic data)
-poetry run python -m vision_spectra.experiments.run_synthetic_experiments run \
-    --num-classes 3 \
-    --num-samples 1000 \
-    --epochs 30 \
+# Run all scenarios at once
+poetry run python -m vision_spectra.experiments.run_spectral_analysis run-all \
     --num-seeds 3 \
-    --log-every-n-epochs 2 \
+    --device auto
+
+# Or run individual scenarios:
+
+# Scenario A: Expressive + Simple (synthetic data)
+poetry run python -m vision_spectra.experiments.run_spectral_analysis scenario-a \
+    --num-seeds 3 \
     --device auto
 
 # Scenario B: Expressive + Complex (real medical data)
-poetry run vision-spectra experiments run \
-    --dataset pathmnist \
-    --losses cross_entropy \
-    --epochs 50 \
+poetry run python -m vision_spectra.experiments.run_spectral_analysis scenario-b \
     --num-seeds 3 \
-    --log-every-n-epochs 5 \
-    --log-first-epochs \
-    --track-distributions \
     --device auto
 
 # Scenario C: Reduced Expressivity + Complex (narrow network)
-# Requires spectral analysis module with model width configuration
-poetry run python -m vision_spectra.experiments.run_spectral_analysis run \
-    --scenario reduced_expressivity \
-    --dataset pathmnist \
-    --model-width 96 \
-    --epochs 50 \
+poetry run python -m vision_spectra.experiments.run_spectral_analysis scenario-c \
     --num-seeds 3 \
     --device auto
+
+# Scenario D: Reduced Expressivity + Simple (narrow network + simple data)
+poetry run python -m vision_spectra.experiments.run_spectral_analysis scenario-d \
+    --num-seeds 3 \
+    --device auto
+
+# Compare results across all scenarios
+poetry run python -m vision_spectra.experiments.run_spectral_analysis compare
 ```
 
 ---
