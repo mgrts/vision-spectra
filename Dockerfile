@@ -1,7 +1,7 @@
 # Vision Spectra
 # Analyzing how loss functions affect transformer weight spectra in vision tasks.
 
-FROM python:3.11-slim as base
+FROM python:3.11-slim AS base
 
 # Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -35,7 +35,7 @@ COPY pyproject.toml poetry.lock* ./
 RUN poetry install --no-root --only main
 
 # Copy source code
-COPY src/ ./src/
+COPY vision_spectra/ ./vision_spectra/
 COPY configs/ ./configs/
 COPY README.md ./
 

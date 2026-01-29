@@ -260,5 +260,5 @@ jobs:
       run: poetry install --only dev --no-interaction
 
     - name: Run Bandit security scan
-      run: poetry run bandit -r src/ -c pyproject.toml || true
+      run: poetry run bandit -r vision_spectra/ -c pyproject.toml || true
       continue-on-error: true
