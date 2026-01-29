@@ -30,6 +30,7 @@ pillow = ">=10.3.0"
 medmnist = "^3.0"
 einops = "^0.8"
 rich = "^14.2.0"
+scipy-stubs = "~=1.17.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0"

@@ -181,4 +181,8 @@ logs/
 *.key
 *.pem
 
+# References folder (contains docs and generated figures)
 references/
+
+# Publication figures (legacy location - moved to references/figures)
+publication_figures/

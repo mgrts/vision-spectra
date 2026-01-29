@@ -90,6 +90,8 @@ class ScenarioType(str, Enum):
     B_EXPRESSIVE_COMPLEX = "B"  # Expressive network + Complex data
     C_REDUCED_COMPLEX = "C"  # Reduced expressivity + Complex data
     D_REDUCED_SIMPLE = "D"  # Reduced expressivity + Simple data
+    E_TINY_SIMPLE = "E"  # Tiny network + Simple data (minimal capacity)
+    F_TINY_COMPLEX = "F"  # Tiny network + Complex data (minimal capacity, high complexity)
 
 
 class DeviceChoice(str, Enum):
@@ -201,6 +203,36 @@ SCENARIO_CONFIGS = {
         log_epochs=[0, 1, 2, 3, 4, 5, 10, 15, 20, 25, 29],
         description="Reduced expressivity network on simple synthetic data",
     ),
+    ScenarioType.E_TINY_SIMPLE: ScenarioConfig(
+        scenario=ScenarioType.E_TINY_SIMPLE,
+        model_name="vit_tiny_patch16_224",  # Will be modified with minimal width
+        embed_dim=32,  # Minimal: 1/6 of standard ViT-Tiny
+        depth=1,  # Single layer
+        dataset_name="synthetic",
+        num_samples=1000,
+        num_classes=3,
+        epochs=30,
+        batch_size=32,
+        learning_rate=1e-4,
+        seeds=[42, 123, 456],
+        log_epochs=[0, 1, 2, 3, 4, 5, 10, 15, 20, 25, 29],
+        description="Tiny network (embed=32, depth=1) on simple synthetic data",
+    ),
+    ScenarioType.F_TINY_COMPLEX: ScenarioConfig(
+        scenario=ScenarioType.F_TINY_COMPLEX,
+        model_name="vit_tiny_patch16_224",  # Will be modified with minimal width
+        embed_dim=32,  # Minimal: 1/6 of standard ViT-Tiny
+        depth=1,  # Single layer
+        dataset_name="pathmnist",
+        num_samples=None,  # Use full dataset
+        num_classes=9,
+        epochs=50,
+        batch_size=64,
+        learning_rate=1e-4,
+        seeds=[42, 123, 456],
+        log_epochs=[0, 1, 2, 3, 4, 5, 10, 15, 20, 30, 40, 49],
+        description="Tiny network (embed=32, depth=1) on complex PathMNIST data",
+    ),
 }
 
 
@@ -223,6 +255,8 @@ def create_model_for_scenario(
     if scenario_config.scenario in (
         ScenarioType.C_REDUCED_COMPLEX,
         ScenarioType.D_REDUCED_SIMPLE,
+        ScenarioType.E_TINY_SIMPLE,
+        ScenarioType.F_TINY_COMPLEX,
     ):
         # Create a custom narrow/shallow ViT
         # Using timm's flexibility to create custom configurations
@@ -801,13 +835,89 @@ def run_scenario_d(
     _print_scenario_summary(results)
 
 
+@app.command("scenario-e")
+def run_scenario_e(
+    num_seeds: int = typer.Option(3, "--num-seeds", "-n"),
+    device: DeviceChoice = typer.Option(DeviceChoice.AUTO, "--device"),
+    output_dir: Path = typer.Option(None, "--output", "-o"),
+) -> None:
+    """
+    Run Scenario E: Tiny network + Simple data.
+
+    Expected outcome: Test if minimal capacity network develops heavy tails on simple data.
+    Uses embed_dim=32 (1/6 of ViT-Tiny) and depth=1 (single layer).
+    """
+    resolved_output = output_dir or MLRUNS_DIR
+    resolved_device = resolve_device(device)
+
+    config = SCENARIO_CONFIGS[ScenarioType.E_TINY_SIMPLE]
+    config.seeds = [42 + i * 100 for i in range(num_seeds)]
+
+    console.print(f"\n[bold blue]Scenario E: {config.description}[/bold blue]")
+    console.print(f"  Tiny embed_dim: {config.embed_dim}, depth: {config.depth}")
+    console.print(f"  Seeds: {config.seeds}")
+    console.print(f"  Device: {resolved_device}")
+    console.print()
+
+    results = []
+    for seed in config.seeds:
+        console.print(f"\n[cyan]Running seed {seed}...[/cyan]")
+        result = run_scenario_experiment(config, seed, resolved_device, resolved_output)
+        results.append(result)
+
+        if result.success:
+            console.print(f"  ✓ Completed: Val Acc = {result.best_val_accuracy:.2f}%")
+        else:
+            console.print(f"  ✗ Failed: {result.error_message}")
+
+    _print_scenario_summary(results)
+
+
+@app.command("scenario-f")
+def run_scenario_f(
+    num_seeds: int = typer.Option(3, "--num-seeds", "-n"),
+    device: DeviceChoice = typer.Option(DeviceChoice.AUTO, "--device"),
+    output_dir: Path = typer.Option(None, "--output", "-o"),
+) -> None:
+    """
+    Run Scenario F: Tiny network + Complex data.
+
+    Expected outcome: Extreme over-compression due to minimal capacity on complex data.
+    Uses embed_dim=32 (1/6 of ViT-Tiny) and depth=1 (single layer) on PathMNIST.
+    """
+    resolved_output = output_dir or MLRUNS_DIR
+    resolved_device = resolve_device(device)
+
+    config = SCENARIO_CONFIGS[ScenarioType.F_TINY_COMPLEX]
+    config.seeds = [42 + i * 100 for i in range(num_seeds)]
+
+    console.print(f"\n[bold blue]Scenario F: {config.description}[/bold blue]")
+    console.print(f"  Tiny embed_dim: {config.embed_dim}, depth: {config.depth}")
+    console.print(f"  Seeds: {config.seeds}")
+    console.print(f"  Device: {resolved_device}")
+    console.print()
+
+    results = []
+    for seed in config.seeds:
+        console.print(f"\n[cyan]Running seed {seed}...[/cyan]")
+        result = run_scenario_experiment(config, seed, resolved_device, resolved_output)
+        results.append(result)
+
+        if result.success:
+            console.print(f"  ✓ Completed: Val Acc = {result.best_val_accuracy:.2f}%")
+        else:
+            console.print(f"  ✗ Failed: {result.error_message}")
+
+    _print_scenario_summary(results)
+
+
 @app.command("run-all")
 def run_all_scenarios(
     num_seeds: int = typer.Option(3, "--num-seeds", "-n"),
     device: DeviceChoice = typer.Option(DeviceChoice.AUTO, "--device"),
     output_dir: Path = typer.Option(None, "--output", "-o"),
 ) -> None:
-    """Run all four scenarios sequentially."""
+    """Run all six scenarios sequentially."""
     console.print(
         "\n[bold magenta]═══ Running All Spectral Analysis Scenarios ═══[/bold magenta]\n"
     )
@@ -816,6 +926,8 @@ def run_all_scenarios(
     run_scenario_b(num_seeds=num_seeds, device=device, output_dir=output_dir)
     run_scenario_c(num_seeds=num_seeds, device=device, output_dir=output_dir)
     run_scenario_d(num_seeds=num_seeds, device=device, output_dir=output_dir)
+    run_scenario_e(num_seeds=num_seeds, device=device, output_dir=output_dir)
+    run_scenario_f(num_seeds=num_seeds, device=device, output_dir=output_dir)
 
     console.print("\n[bold green]All scenarios completed![/bold green]")
     console.print("View results with: poetry run mlflow ui --backend-store-uri mlruns/")

@@ -84,20 +84,27 @@ This project provides experiment modules for systematic analysis of how loss fun
 
 ---
 
-### Core Four-Scenario Experiment Framework
+### Core Six-Scenario Experiment Framework
 
-The research is structured around four key scenarios that test the relationship between network expressivity, data complexity, and spectral properties:
+The research is structured around six key scenarios that test the relationship between network expressivity, data complexity, and spectral properties:
 
-| Scenario | ID | Network | Data | Expected α | Expected r_s | Purpose |
-|----------|----|---------|------|------------|--------------|---------|
-| **A: Expressive + Simple** | `EXP_A` | ViT-Tiny (full) | Synthetic shapes (3 classes, 1K samples) | Low (~1-2) | High | Baseline: no compression needed |
-| **B: Expressive + Complex** | `EXP_B` | ViT-Tiny (full) | PathMNIST (9 classes, 89K samples) | High (~3-5) | Low | Main: compression regime |
-| **C: Reduced + Complex** | `EXP_C` | ViT-Tiny (narrow) | PathMNIST (9 classes, 89K samples) | Low (~1-2) | Medium-High | Control: insufficient capacity |
-| **D: Reduced + Simple** | `EXP_D` | ViT-Tiny (narrow) | Synthetic shapes (3 classes, 1K samples) | Low (~1-2) | High | Control: simple data + reduced capacity |
+| Scenario | ID | Network | Data | Δα Observed | Accuracy | Purpose |
+|----------|----|---------|------|-------------|----------|---------|
+| **A: Expressive + Simple** | `EXP_A` | ViT-Tiny (192d, 6L) | Synthetic shapes | **+0.004** | 96.5% | Baseline: no compression needed |
+| **B: Expressive + Complex** | `EXP_B` | ViT-Tiny (192d, 6L) | PathMNIST | **+0.127** | 70.9% | Main: compression regime |
+| **C: Reduced + Complex** | `EXP_C` | ViT-Narrow (96d, 3L) | PathMNIST | **+0.315** | 65.3% | Over-compression: insufficient capacity |
+| **D: Reduced + Simple** | `EXP_D` | ViT-Narrow (96d, 3L) | Synthetic shapes | **+0.009** | 96.0% | Control: simple data + reduced capacity |
+| **E: Tiny + Simple** | `EXP_E` | ViT-Tiny (32d, 1L) | Synthetic shapes | **+0.015** | 86.5% | Minimal capacity on simple data |
+| **F: Tiny + Complex** | `EXP_F` | ViT-Tiny (32d, 1L) | PathMNIST | **+0.451** | 56.8% | **Extreme over-compression** |
 
-**Hypothesis:** Heavy-tailed spectra emerge when an expressive network must compress complex data, while simpler data or reduced capacity leads to more uniform singular value distributions.
+**Key Findings:**
 
-#### Running the Four Scenarios
+- Heavy-tailed spectra emerge as a function of complexity/capacity ratio
+- Scenario F shows the most extreme compression (Δα = +0.451) with α nearly doubling
+- Capacity-compression hierarchies: A < D < E (simple data) and B < C < F (complex data)
+- Over-compression (Δα > ~0.3) degrades accuracy significantly
+
+#### Running the Six Scenarios
 
 ```bash
 # Run all scenarios at once
@@ -127,9 +134,39 @@ poetry run python -m vision_spectra.experiments.run_spectral_analysis scenario-d
     --num-seeds 3 \
     --device auto
 
+# Scenario E: Tiny Network + Simple (minimal capacity: embed=32, depth=1)
+poetry run python -m vision_spectra.experiments.run_spectral_analysis scenario-e \
+    --num-seeds 3 \
+    --device auto
+
+# Scenario F: Tiny Network + Complex (minimal capacity on complex data)
+poetry run python -m vision_spectra.experiments.run_spectral_analysis scenario-f \
+    --num-seeds 3 \
+    --device auto
+
 # Compare results across all scenarios
 poetry run python -m vision_spectra.experiments.run_spectral_analysis compare
+
+# Generate publication-quality figures
+poetry run python -m vision_spectra.experiments.pub_figures
 ```
+
+#### Publication Figures
+
+After running experiments, generate publication-quality figures:
+
+```bash
+poetry run python -m vision_spectra.experiments.pub_figures
+```
+
+This creates the following in `publication_figures/`:
+
+- `delta_alpha_bar.png` - Bar chart comparing Δα across scenarios
+- `accuracy_vs_compression.png` - Scatter plot of accuracy vs compression
+- `heatmap.png` - Capacity × Complexity heatmap
+- `stable_rank.png` - Stable rank reduction comparison
+- `stats.json` - Statistical test results (t-tests, p-values)
+- `table.tex` - LaTeX table for papers
 
 ---
 

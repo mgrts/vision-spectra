@@ -19,6 +19,7 @@ import typer
 from loguru import logger
 
 from vision_spectra import __version__
+from vision_spectra.analysis.publication_figures import app as figures_app
 from vision_spectra.experiments.run_classification_experiments import (
     app as experiments_app,
 )
@@ -32,6 +33,9 @@ app = typer.Typer(
 
 # Add experiments as a sub-command group
 app.add_typer(experiments_app, name="experiments")
+
+# Add figures generation as a sub-command group
+app.add_typer(figures_app, name="figures")
 
 
 # =============================================================================

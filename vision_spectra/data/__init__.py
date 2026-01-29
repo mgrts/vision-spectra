@@ -2,7 +2,7 @@
 
 from vision_spectra.data.base import BaseDataset, DatasetInfo, get_dataset
 from vision_spectra.data.medmnist import MedMNISTDataset
-from vision_spectra.data.synthetic import SyntheticDataset
+from vision_spectra.data.synthetic import SyntheticDataset, create_synthetic_dataset
 
 __all__ = [
     "BaseDataset",
@@ -10,4 +10,5 @@ __all__ = [
     "get_dataset",
     "MedMNISTDataset",
     "SyntheticDataset",
+    "create_synthetic_dataset",
 ]

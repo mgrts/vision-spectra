@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import torch
 from PIL import Image, ImageDraw
-from torch.utils.data import Dataset
+from torch.utils.data import DataLoader, Dataset
 
 from vision_spectra.data.base import BaseDataset, DatasetInfo
 from vision_spectra.data.transforms import get_eval_transforms, get_train_transforms
@@ -218,3 +218,92 @@ class SyntheticDataset(BaseDataset):
 
     def get_info(self) -> DatasetInfo:
         return self._info
+
+
+def create_synthetic_dataset(
+    num_classes: int = 5,
+    num_samples_train: int = 1000,
+    num_samples_val: int = 200,
+    num_samples_test: int = 200,
+    batch_size: int = 32,
+    image_size: int = 28,
+    num_channels: int = 3,
+    seed: int = 42,
+    num_workers: int = 0,
+) -> tuple:
+    """
+    Create synthetic dataset with data loaders.
+
+    This is a convenience function that creates train, val, and test data loaders
+    for the synthetic geometric shapes dataset without requiring a config object.
+
+    Args:
+        num_classes: Number of classes (max 5 for available shapes).
+        num_samples_train: Number of training samples.
+        num_samples_val: Number of validation samples.
+        num_samples_test: Number of test samples.
+        batch_size: Batch size for data loaders.
+        image_size: Size of generated images.
+        num_channels: Number of image channels (1 or 3).
+        seed: Random seed for reproducibility.
+        num_workers: Number of worker processes for data loading.
+
+    Returns:
+        Tuple of (train_loader, val_loader, test_loader).
+    """
+    # Use different seeds for each split to ensure no overlap
+    train_transform = get_train_transforms(image_size, num_channels)
+    eval_transform = get_eval_transforms(image_size, num_channels)
+
+    train_dataset = SyntheticImageDataset(
+        num_samples=num_samples_train,
+        num_classes=num_classes,
+        image_size=image_size,
+        num_channels=num_channels,
+        seed=seed,
+        transform=train_transform,
+    )
+
+    val_dataset = SyntheticImageDataset(
+        num_samples=num_samples_val,
+        num_classes=num_classes,
+        image_size=image_size,
+        num_channels=num_channels,
+        seed=seed + 1,
+        transform=eval_transform,
+    )
+
+    test_dataset = SyntheticImageDataset(
+        num_samples=num_samples_test,
+        num_classes=num_classes,
+        image_size=image_size,
+        num_channels=num_channels,
+        seed=seed + 2,
+        transform=eval_transform,
+    )
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=False,
+    )
+
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=False,
+    )
+
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=False,
+    )
+
+    return train_loader, val_loader, test_loader
