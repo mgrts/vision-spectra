@@ -55,10 +55,10 @@ jobs:
       run: poetry install --only dev --no-interaction
 
     - name: Run Ruff linter
-      run: poetry run ruff check src/ tests/
+      run: poetry run ruff check vision_spectra/ tests/
 
     - name: Run Ruff formatter check
-      run: poetry run ruff format --check src/ tests/
+      run: poetry run ruff format --check vision_spectra/ tests/
 
   # ============================================
   # Type Checking
@@ -94,7 +94,7 @@ jobs:
       run: poetry install --no-interaction
 
     - name: Run mypy
-      run: poetry run mypy src/ --ignore-missing-imports || true
+      run: poetry run mypy vision_spectra/ --ignore-missing-imports || true
       continue-on-error: true
 
   # ============================================
