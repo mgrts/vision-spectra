@@ -67,7 +67,7 @@ repos:
   hooks:
   - id: bandit
     args: [--skip, "B101,B110,B404,B603"]
-    exclude: ^tests/
+    exclude: ^(tests|\.claude)/
 
   # Markdown linting
 - repo: https://github.com/igorshubovych/markdownlint-cli
