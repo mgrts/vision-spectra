@@ -32,7 +32,6 @@ from datetime import datetime
 from enum import Enum
 from pathlib import Path
 
-import mlflow
 import typer
 from loguru import logger
 from rich.console import Console
@@ -123,6 +122,11 @@ class ExperimentResult:
     training_time_seconds: float
     checkpoint_path: str | None
     mlflow_run_id: str | None
+    # Held-out TEST metrics (the unbiased generalization estimate). None if the
+    # dataset has no separate test split.
+    test_accuracy: float | None = None
+    test_f1: float | None = None
+    test_auroc: float | None = None
     spectral_metrics: dict[str, float] = field(default_factory=dict)
     success: bool = True
     error_message: str | None = None
@@ -230,6 +234,8 @@ def run_single_experiment(
             ),
             model=ModelConfig(
                 name=config.model_name,
+                # patch_size=4 -> real 7x7=49-patch ViT at 28px (not a 1-patch model).
+                patch_size=4,
             ),
             loss=LossConfig(
                 classification=LossName(loss_name),
@@ -246,6 +252,10 @@ def run_single_experiment(
                 early_stopping=True,
                 patience=config.early_stopping_patience,
                 save_every_n_epochs=10,
+                # Select/stop on accuracy (loss-agnostic) so different losses'
+                # incomparable loss scales don't select checkpoints at different
+                # points on different optimization trajectories.
+                monitor="accuracy",
             ),
             spectral=SpectralConfig(
                 enabled=not config.fast_mode,
@@ -294,27 +304,40 @@ def run_single_experiment(
 
         training_time = time.time() - start_time
 
-        # Get final metrics from trainer
+        # Metrics on the BEST model: train() restores the best checkpoint before
+        # returning, so this reflects the best epoch. All best_val_* are sourced
+        # from this single re-validation (so they are mutually consistent and
+        # correct regardless of which metric `monitor` selected on).
         val_metrics = trainer.validate()
 
-        # Get MLflow run ID
-        mlflow_run_id = None
-        with contextlib.suppress(Exception):
-            mlflow_run_id = mlflow.active_run().info.run_id if mlflow.active_run() else None
+        # Held-out TEST evaluation on the best-restored model: the unbiased
+        # generalization estimate (validation was used for model selection).
+        test_metrics: dict[str, float] = {}
+        try:
+            test_metrics = trainer.evaluate(dataset_obj.get_test_loader())
+        except Exception as test_err:
+            logger.warning(f"Test-set evaluation unavailable: {test_err}")
+
+        # MLflow run id is captured inside train() while the run is still active
+        # (it is no longer active here, after the run context has exited).
+        mlflow_run_id = result.get("mlflow_run_id")
 
         experiment_result = ExperimentResult(
             dataset=dataset_name,
             loss=loss_name,
             seed=seed,
-            best_val_loss=result.get("best_val_metric", float("inf")),
+            best_val_loss=val_metrics.get("loss", float("inf")),
             best_val_accuracy=val_metrics.get("accuracy", 0.0),
             best_val_f1=val_metrics.get("f1_macro", 0.0),
             best_val_auroc=val_metrics.get("auroc", 0.0),
+            test_accuracy=test_metrics.get("accuracy"),
+            test_f1=test_metrics.get("f1_macro"),
+            test_auroc=test_metrics.get("auroc"),
             final_epoch=result.get("final_epoch", 0),
             training_time_seconds=training_time,
-            checkpoint_path=str(result.get("best_checkpoint"))
-            if result.get("best_checkpoint")
-            else None,
+            # The local best_checkpoint path lives in a temp dir cleanup()
+            # deletes; record the durable MLflow artifact URI instead.
+            checkpoint_path=result.get("best_checkpoint_uri"),
             mlflow_run_id=mlflow_run_id,
             success=True,
         )
@@ -554,11 +577,12 @@ def run_classification(
         "-s",
         help="Specific seeds to use for reproducibility.",
     ),
-    num_seeds: int = typer.Option(
-        5,
+    num_seeds: int | None = typer.Option(
+        None,
         "--num-seeds",
         "-n",
-        help="Number of seeds to generate if --seeds not specified.",
+        help="Number of seeds to generate (42, 142, 242, ...) if --seeds not "
+        "specified. Omit to use the canonical DEFAULT_SEEDS.",
     ),
     epochs: int = typer.Option(
         50,
@@ -651,10 +675,12 @@ def run_classification(
     # Determine which losses to use
     resolved_losses = list(losses) if losses else DEFAULT_LOSSES
 
-    # Determine seeds
+    # Determine seeds. Explicit --seeds wins; otherwise an explicit --num-seeds
+    # generates an arithmetic sequence (consistent for any count, including 5);
+    # omitting both uses the canonical DEFAULT_SEEDS.
     if seeds:
         resolved_seeds = list(seeds)
-    elif num_seeds != 5:
+    elif num_seeds is not None:
         resolved_seeds = [42 + i * 100 for i in range(num_seeds)]
     else:
         resolved_seeds = DEFAULT_SEEDS

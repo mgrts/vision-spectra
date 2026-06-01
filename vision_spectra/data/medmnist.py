@@ -99,8 +99,8 @@ MEDMNIST_INFO = {
             "liver",
             "lung-left",
             "lung-right",
-            "spleen",
             "pancreas",
+            "spleen",
         ],
     },
 }

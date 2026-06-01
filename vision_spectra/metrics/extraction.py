@@ -15,6 +15,19 @@ import torch
 import torch.nn as nn
 
 
+def _matches_patterns(name: str, patterns: list[str] | None) -> bool:
+    """Return True if ``name`` matches any pattern at a dot/string boundary.
+
+    Uses a boundary-aware match so a pattern like ``"blocks.2"`` matches
+    ``encoder.blocks.2.attn.qkv`` but NOT ``encoder.blocks.20.attn.qkv`` (a raw
+    substring test would over-select blocks 20-29 on >=10-block models). With no
+    patterns, everything matches.
+    """
+    if not patterns:
+        return True
+    return any(re.search(rf"(?:^|\.){re.escape(pat)}(?:\.|$)", name) for pat in patterns)
+
+
 @dataclass
 class WeightInfo:
     """Information about an extracted weight matrix."""
@@ -48,7 +61,7 @@ def extract_qkv_weights(
 
     for name, module in model.named_modules():
         # Skip if doesn't match pattern
-        if layer_patterns and not any(pat in name for pat in layer_patterns):
+        if not _matches_patterns(name, layer_patterns):
             continue
 
         # Handle combined QKV weight (common in timm)
@@ -129,7 +142,7 @@ def extract_attention_weights(
     weights: list[WeightInfo] = []
 
     for name, module in model.named_modules():
-        if layer_patterns and not any(pat in name for pat in layer_patterns):
+        if not _matches_patterns(name, layer_patterns):
             continue
 
         # Output projection (timm uses 'proj')
@@ -172,7 +185,7 @@ def extract_mlp_weights(
     weights: list[WeightInfo] = []
 
     for name, module in model.named_modules():
-        if layer_patterns and not any(pat in name for pat in layer_patterns):
+        if not _matches_patterns(name, layer_patterns):
             continue
 
         # MLP layers (timm uses 'mlp.fc1', 'mlp.fc2')
@@ -208,6 +221,12 @@ def extract_mlp_weights(
 def extract_patch_embed_weights(model: nn.Module) -> list[WeightInfo]:
     """
     Extract patch embedding weights.
+
+    Note:
+        Unlike the block extractors, the patch embedding is NOT a transformer
+        block and is intentionally governed solely by the ``include_patch_embed``
+        flag in :func:`extract_all_weights` — it is independent of
+        ``layer_patterns`` (which scope block selection).
 
     Args:
         model: Transformer model with patch embedding
@@ -259,7 +278,9 @@ def extract_all_weights(
         include_qkv: Include Q/K/V projection weights
         include_proj: Include attention output projection
         include_mlp: Include MLP weights
-        include_patch_embed: Include patch embedding weights
+        include_patch_embed: Include patch embedding weights. The patch
+            embedding is governed solely by this flag and is NOT filtered by
+            ``layer_patterns`` (which scope only the transformer blocks).
 
     Returns:
         List of all extracted WeightInfo

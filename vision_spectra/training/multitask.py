@@ -10,7 +10,7 @@ import mlflow
 import torch
 import torch.nn as nn
 from loguru import logger
-from torch.cuda.amp import autocast
+from torch.amp import autocast
 from torchmetrics import Accuracy, F1Score
 from tqdm import tqdm
 
@@ -109,6 +109,13 @@ class MultitaskTrainer(BaseTrainer):
                 def patch_size(self):
                     return self.mtl_model.patch_size
 
+                @property
+                def norm_pix_loss(self):
+                    return self.mtl_model.norm_pix_loss
+
+                def patchify(self, x):
+                    return self.mtl_model.patchify(x)
+
                 def unpatchify(self, x):
                     return self.mtl_model.unpatchify(x)
 
@@ -165,12 +172,13 @@ class MultitaskTrainer(BaseTrainer):
             images = images.to(self.device, non_blocking=True)
             targets = targets.to(self.device, non_blocking=True)
 
-            self._warmup_lr(self.current_epoch, batch_idx, len(self.train_loader))
+            # Pass 0-based epoch so the warmup ramp aligns with the scheduler gate.
+            self._warmup_lr(self.current_epoch - 1, batch_idx, len(self.train_loader))
 
             self.optimizer.zero_grad()
 
             if self.use_amp:
-                with autocast():
+                with autocast("cuda"):
                     logits, mim_loss, pred, mask = self.model.forward_multitask(
                         images, mask_ratio=self.mask_ratio
                     )
@@ -246,7 +254,7 @@ class MultitaskTrainer(BaseTrainer):
                 targets = targets.to(self.device, non_blocking=True)
 
                 if self.use_amp:
-                    with autocast():
+                    with autocast("cuda"):
                         logits, mim_loss, pred, mask = self.model.forward_multitask(
                             images, mask_ratio=self.mask_ratio
                         )

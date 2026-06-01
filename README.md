@@ -1,16 +1,29 @@
 # Vision Spectra
 
-**Analyzing how loss functions affect transformer weight spectra in vision tasks.**
+**Studying how network capacity and data complexity shape the weight spectra of Vision Transformers.**
 
-This project trains Vision Transformers (ViT) for image classification and studies how different loss functions influence the spectral properties of weight matrices (Q/K/V projections, etc.) throughout training.
+This project trains small Vision Transformers (ViT) for image classification and studies how the spectral properties of their weight matrices (Q/K/V projections, MLP, etc.) evolve during training across a capacity × data-complexity grid.
+
+> **⚠️ Methodology status — read before using the numbers**
+>
+> A methodological review corrected several issues in how the experiments were set up and reported. **The headline result numbers committed under `references/figures/` and in the table below were produced under the *previous* configuration and must be regenerated before they are cited.** Key points:
+>
+> - **Architecture fixed:** experiments previously ran `patch16` on 28px inputs, which collapses to a **single patch token** (a degenerate, non-spatial ViT), and scenarios A/B silently ran at **12 layers instead of the documented 6**. Both are now fixed (`patch_size=4` → a real 7×7=49-patch grid; depth is enforced). Re-run the scenarios to get valid numbers.
+> - **"Δα" is a rank-decay slope, *not* the Martin & Mahoney heavy-tail / ESD exponent.** They are different (even inversely related) quantities. The theory-matching Hill estimator is now also computed and reported (`pl_alpha_hill`). Treat the heavy-tail framing as motivation, not as something this slope measures directly.
+> - **Accuracy is now a held-out *test* metric.** Previously the reported accuracy was best-of-many *validation* accuracy (optimistically biased; no test split was scored).
+> - **Statistics are descriptive at n=3 seeds.** Reported p-values reflect near-deterministic seed variance, not generalizability; error bars are 95% CIs and a multiple-comparison correction is applied. Run ≥10 seeds before making inferential claims.
+> - **Δα vs accuracy is observational/confounded:** capacity and data complexity drive *both*, so this is not evidence that compression *causes* accuracy loss.
 
 ## Research Motivation
 
-The spectral properties of neural network weight matrices—such as spectral entropy, stable rank, and power-law exponents—provide insights into model expressivity, generalization, and implicit regularization. This project systematically studies how:
+The spectral properties of neural network weight matrices—spectral entropy, stable rank, and power-law-style exponents—are studied as a window into model expressivity, generalization, and implicit regularization. The **measured** study here is:
 
-1. **Different classification losses** (cross-entropy, focal loss, label smoothing, class-balanced losses) affect weight spectra
-2. **Training paradigms** (supervised, self-supervised pretraining, multitask learning) influence spectral evolution
-3. **Masked Image Modeling (MIM)** pretraining changes the spectral structure compared to pure supervised learning
+- **Capacity × data complexity → weight spectra** (the six A–F scenarios below): how network width/depth and data complexity jointly shape the singular-value spectrum during training.
+
+The following are **scaffolded but not yet a controlled, reported study** (the code exists; the experiments have not been run as fair comparisons) and are tracked as future work:
+
+- **Loss-function effect on spectra** (cross-entropy / focal / label-smoothing / class-balanced / asymmetric). The loss comparison currently reports classification quality, not spectra; a fair, hyperparameter-controlled spectral comparison across losses has not been run.
+- **Self-supervised (MIM) vs supervised** spectral structure, and multitask learning. No controlled MIM-vs-supervised spectral comparison is currently produced.
 
 ## Supported Training Regimes
 
@@ -86,23 +99,29 @@ This project provides experiment modules for systematic analysis of how loss fun
 
 ### Core Six-Scenario Experiment Framework
 
-The research is structured around six key scenarios that test the relationship between network expressivity, data complexity, and spectral properties:
+The research is structured around six scenarios that vary network capacity (`embed_dim`/`depth`) and data complexity (synthetic shapes vs PathMNIST):
 
-| Scenario | ID | Network | Data | Δα Observed | Accuracy | Purpose |
-|----------|----|---------|------|-------------|----------|---------|
-| **A: Expressive + Simple** | `EXP_A` | ViT-Tiny (192d, 6L) | Synthetic shapes | **+0.004** | 96.5% | Baseline: no compression needed |
-| **B: Expressive + Complex** | `EXP_B` | ViT-Tiny (192d, 6L) | PathMNIST | **+0.127** | 70.9% | Main: compression regime |
-| **C: Reduced + Complex** | `EXP_C` | ViT-Narrow (96d, 3L) | PathMNIST | **+0.315** | 65.3% | Over-compression: insufficient capacity |
-| **D: Reduced + Simple** | `EXP_D` | ViT-Narrow (96d, 3L) | Synthetic shapes | **+0.009** | 96.0% | Control: simple data + reduced capacity |
-| **E: Tiny + Simple** | `EXP_E` | ViT-Tiny (32d, 1L) | Synthetic shapes | **+0.015** | 86.5% | Minimal capacity on simple data |
-| **F: Tiny + Complex** | `EXP_F` | ViT-Tiny (32d, 1L) | PathMNIST | **+0.451** | 56.8% | **Extreme over-compression** |
+| Scenario | ID | Network | Data | Purpose |
+|----------|----|---------|------|---------|
+| **A: Expressive + Simple** | `EXP_A` | ViT (192d, 6L, patch4) | Synthetic shapes | Baseline: ample capacity for simple data |
+| **B: Expressive + Complex** | `EXP_B` | ViT (192d, 6L, patch4) | PathMNIST | Main: compression regime |
+| **C: Reduced + Complex** | `EXP_C` | ViT (96d, 3L, patch4) | PathMNIST | Over-compression: reduced capacity |
+| **D: Reduced + Simple** | `EXP_D` | ViT (96d, 3L, patch4) | Synthetic shapes | Control: simple data + reduced capacity |
+| **E: Tiny + Simple** | `EXP_E` | ViT (32d, 1L, patch4) | Synthetic shapes | Minimal capacity on simple data |
+| **F: Tiny + Complex** | `EXP_F` | ViT (32d, 1L, patch4) | PathMNIST | Extreme over-compression |
 
-**Key Findings:**
+> **The Δα / accuracy numbers previously shown here have been removed because they
+> were produced under the prior degenerate configuration (1-patch ViT; A/B at 12
+> layers) and are no longer valid.** Regenerate them by running the scenarios under
+> the corrected config (`vision-spectra spectral run-all`) and then
+> `vision-spectra figures all`.
 
-- Heavy-tailed spectra emerge as a function of complexity/capacity ratio
-- Scenario F shows the most extreme compression (Δα = +0.451) with α nearly doubling
-- Capacity-compression hierarchies: A < D < E (simple data) and B < C < F (complex data)
-- Over-compression (Δα > ~0.3) degrades accuracy significantly
+**Expected/hypothesized findings (to be confirmed under the corrected config):**
+
+- The bulk singular-value spectrum is hypothesized to change more (larger Δα rank-slope) as the data-complexity / network-capacity ratio increases.
+- Δα is reported as a **rank-decay slope** (and alongside the Hill ESD tail exponent); it is **not** the Martin & Mahoney heavy-tail index, so do not read it through the M&M "α ∈ [2,6]" band.
+- Any relationship between Δα and accuracy is **observational and confounded** by capacity/complexity (which drive both) — it is not evidence that compression *causes* accuracy loss. Accuracy is also not directly comparable across the 3-class synthetic and 9-class PathMNIST arms (different chance levels).
+- Statistics are **descriptive at n=3 seeds** (run ≥10 seeds for inferential claims).
 
 #### Running the Six Scenarios
 
@@ -148,7 +167,7 @@ poetry run python -m vision_spectra.experiments.run_spectral_analysis scenario-f
 poetry run python -m vision_spectra.experiments.run_spectral_analysis compare
 
 # Generate publication-quality figures
-poetry run python -m vision_spectra.experiments.pub_figures
+poetry run vision-spectra figures all  # or: python -m vision_spectra.analysis.publication_figures all
 ```
 
 #### Publication Figures
@@ -156,7 +175,7 @@ poetry run python -m vision_spectra.experiments.pub_figures
 After running experiments, generate publication-quality figures:
 
 ```bash
-poetry run python -m vision_spectra.experiments.pub_figures
+poetry run vision-spectra figures all  # or: python -m vision_spectra.analysis.publication_figures all
 ```
 
 This creates the following in `publication_figures/`:
@@ -172,7 +191,7 @@ This creates the following in `publication_figures/`:
 
 ### Classification Experiments (Real-World Data)
 
-The classification experiments module compares different loss functions on real-world medical imaging datasets (MedMNIST) with multiple seeds for statistical reliability.
+The classification experiments module compares different loss functions on real-world medical imaging datasets (MedMNIST) across several seeds. Note: this comparison currently reports **classification quality** (accuracy/AUROC/F1), not weight spectra, and the losses are run at fixed default hyperparameters under a shared optimizer/learning-rate — so it is not yet a controlled "loss → spectra" study (see the methodology note at the top). With the default of 3–5 seeds, treat any cross-loss differences as descriptive.
 
 #### Classification Quick Start
 
@@ -355,9 +374,10 @@ For comprehensive analysis, experiments can be run across multiple model variant
 | Synthetic experiments | ✅ Complete | Scenario A fully supported |
 | Narrow network variant | ✅ Complete | `embed_dim`/`depth` params in ViT |
 | Spectral analysis pipeline | ✅ Complete | `run_spectral_analysis.py` |
-| Gradient alignment metric | ✅ Complete | `vision_spectra/metrics/gradient_alignment.py` |
+| Gradient alignment metric | ⚠️ Implemented, not wired | `vision_spectra/metrics/gradient_alignment.py` — not invoked by any experiment/CLI yet |
+| Tail-truncation experiment | ⚠️ Implemented, not wired | `vision_spectra/metrics/tail_truncation.py` — Eckart-Young low-rank truncation; not invoked by any experiment/CLI yet |
 | CCDF/log-log plots | ✅ Complete | `vision_spectra/metrics/plotting.py` |
-| Statistical comparison | ✅ Complete | `vision_spectra/metrics/statistical.py` |
+| Statistical comparison | ✅ Complete | `vision_spectra/metrics/statistical.py` (descriptive; underpowered at n=3) |
 
 #### Shapes in Synthetic Data
 
@@ -371,7 +391,7 @@ For comprehensive analysis, experiments can be run across multiple model variant
 
 **Image properties:**
 
-- Size: 28×28 pixels (resized to 224×224 for ViT)
+- Size: 28×28 pixels, fed to the ViT at 28×28 (`img_size=28`). With `patch_size=4` this yields a 7×7 = 49-patch grid (50 tokens incl. CLS). Inputs are **not** upsampled to 224.
 - Channels: 3 (RGB)
 - Background: Dark noise (RGB 20–60)
 - Shape color: Bright (RGB 150–255)
@@ -413,7 +433,12 @@ All experiments can be configured via:
 
 1. **CLI arguments** (highest priority)
 2. **YAML config files** (via `--config path/to/config.yaml`)
-3. **Environment variables** (prefixed with `VISION_SPECTRA_`)
+
+CLI flags override values loaded from a `--config` file, which override the
+built-in defaults. Unknown or misplaced YAML keys raise a validation error
+(they are not silently ignored), so each key must live under its correct
+section (e.g. `learning_rate` belongs under `optimizer:`, and `num_classes`
+is derived from the dataset rather than set on the model).
 
 Example config file:
 
@@ -425,15 +450,16 @@ dataset:
   batch_size: 64
 
 model:
-  name: vit_tiny_patch4_28
-  num_classes: 9
+  name: vit_tiny_patch16_224
   pretrained: false
+
+optimizer:
+  name: adamw
+  learning_rate: 1e-4
+  weight_decay: 0.05
 
 training:
   epochs: 50
-  optimizer: adamw
-  learning_rate: 1e-4
-  weight_decay: 0.05
 
 loss:
   classification: focal
@@ -526,17 +552,17 @@ docker run --rm --gpus all \
 docker run --rm -it --entrypoint /bin/bash vision-spectra
 ```
 
-### Environment Variables
+### Run Settings
+
+Seed and device are passed as CLI flags (there is no `VISION_SPECTRA_*`
+environment-variable configuration layer):
 
 ```bash
 docker run --rm \
-  -e VISION_SPECTRA_SEED=42 \
-  -e VISION_SPECTRA_DEVICE=cpu \
-  -e MLFLOW_TRACKING_URI=/app/mlruns \
   -v $(pwd)/data:/app/data \
   -v $(pwd)/runs:/app/runs \
   -v $(pwd)/mlruns:/app/mlruns \
-  vision-spectra train-cls --dataset pathmnist
+  vision-spectra train-cls --dataset pathmnist --seed 42 --device cpu
 ```
 
 ## Project Structure

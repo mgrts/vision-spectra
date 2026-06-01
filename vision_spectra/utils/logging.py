@@ -51,16 +51,3 @@ def setup_logging(
             rotation=rotation,
             retention="1 week",
         )
-
-
-def get_logger(name: str):
-    """
-    Get a logger instance.
-
-    Args:
-        name: Logger name
-
-    Returns:
-        Logger instance
-    """
-    return logger.bind(name=name)

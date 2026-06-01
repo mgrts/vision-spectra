@@ -60,10 +60,13 @@ def plot_ccdf(
     Returns:
         Matplotlib axes object
     """
-    import matplotlib.pyplot as plt
-
     if ax is None:
-        fig, ax = plt.subplots(figsize=(8, 6))
+        # Build via Figure() (not plt.subplots) so the standalone figure is not
+        # registered in pyplot's global registry and cannot leak when this
+        # helper is called repeatedly in a loop.
+        from matplotlib.figure import Figure
+
+        ax = Figure(figsize=(8, 6)).subplots()
         setup_plot_style()
 
     sv_sorted = np.sort(singular_values)[::-1]
@@ -122,10 +125,12 @@ def plot_loglog_rank(
     Returns:
         Matplotlib axes object
     """
-    import matplotlib.pyplot as plt
-
     if ax is None:
-        fig, ax = plt.subplots(figsize=(8, 6))
+        # Build via Figure() (not plt.subplots) so the standalone figure is not
+        # registered in pyplot's global registry and cannot leak in a loop.
+        from matplotlib.figure import Figure
+
+        ax = Figure(figsize=(8, 6)).subplots()
         setup_plot_style()
 
     sv_sorted = np.sort(singular_values)[::-1]
@@ -426,11 +431,13 @@ def generate_spectral_report(
 
     if layer_names:
         for metric in ["stable_rank", "alpha_exponent"]:
-            values = np.zeros((len(layer_names), len(epochs)))
+            # Initialize with NaN so missing (layer, epoch) cells stay missing
+            # rather than rendering as a fake 0.0 (which would also defeat the
+            # all-finite guard below and stretch the colour scale).
+            values = np.full((len(layer_names), len(epochs)), np.nan)
             for j, h in enumerate(history):
                 for i, dist in enumerate(h.get("distributions", [])):
-                    if dist.get("metrics"):
-                        values[i, j] = dist["metrics"].get(metric, np.nan)
+                    values[i, j] = dist.get("metrics", {}).get(metric, np.nan)
 
             if np.any(np.isfinite(values)):
                 plot_layer_heatmap(

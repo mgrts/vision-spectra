@@ -188,7 +188,9 @@ class TestSmokeTraining:
             device="cpu",
         )
         config.dataset.name = DatasetName.SYNTHETIC
-        config.dataset.image_size = 28  # Must be divisible by patch_size (14 for vit_tiny)
+        config.dataset.image_size = (
+            28  # Must be divisible by patch_size (14 for the default dinov2 patch14 model)
+        )
         config.dataset.batch_size = 4
         config.dataset.num_samples_train = 16
         config.dataset.num_samples_val = 8
@@ -251,7 +253,9 @@ class TestSmokeTraining:
             device="cpu",
         )
         config.dataset.name = DatasetName.SYNTHETIC
-        config.dataset.image_size = 28  # Must be divisible by patch_size (14 for vit_tiny)
+        config.dataset.image_size = (
+            28  # Must be divisible by patch_size (14 for the default dinov2 patch14 model)
+        )
         config.dataset.batch_size = 4
         config.dataset.num_samples_train = 16
         config.dataset.num_samples_val = 8

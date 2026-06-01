@@ -37,7 +37,6 @@ from datetime import datetime
 from enum import Enum
 from pathlib import Path
 
-import mlflow
 import torch
 import typer
 from loguru import logger
@@ -182,6 +181,10 @@ class SyntheticExperimentResult:
     convergence_epoch: int  # Epoch where val loss stabilized
     checkpoint_path: str | None
     mlflow_run_id: str | None
+    # Held-out TEST metrics (unbiased generalization estimate).
+    test_accuracy: float | None = None
+    test_f1: float | None = None
+    test_auroc: float | None = None
     spectral_metrics: dict[str, float] = field(default_factory=dict)
     success: bool = True
     error_message: str | None = None
@@ -242,6 +245,8 @@ def run_single_synthetic_experiment(
             ),
             model=ModelConfig(
                 name=config.model_name,
+                # patch_size=4 -> real 7x7=49-patch ViT at 28px (not a 1-patch model).
+                patch_size=4,
             ),
             loss=LossConfig(
                 classification=LossName(loss_name),
@@ -258,6 +263,8 @@ def run_single_synthetic_experiment(
                 early_stopping=True,
                 patience=config.early_stopping_patience,
                 save_every_n_epochs=5,
+                # Loss-agnostic selection so cross-loss checkpoints are comparable.
+                monitor="accuracy",
             ),
             spectral=SpectralConfig(
                 enabled=True,
@@ -309,36 +316,44 @@ def run_single_synthetic_experiment(
 
         training_time = time.time() - start_time
 
-        # Get final metrics
+        # Metrics on the BEST model: train() restores the best checkpoint before
+        # returning, so this reflects the best epoch (consistent with
+        # best_val_loss), not the last epoch.
         val_metrics = trainer.validate()
 
-        # Estimate convergence epoch (when improvement stopped)
-        convergence_epoch = result.get("final_epoch", config.epochs)
-        if result.get("stopped_early", False):
-            convergence_epoch = max(
-                0, result.get("final_epoch", 0) - config.early_stopping_patience
-            )
+        # Held-out TEST evaluation on the best-restored model.
+        test_metrics: dict[str, float] = {}
+        try:
+            test_metrics = trainer.evaluate(dataset_obj.get_test_loader())
+        except Exception as test_err:
+            logger.warning(f"Test-set evaluation unavailable: {test_err}")
 
-        # Get MLflow run ID
-        mlflow_run_id = None
-        with contextlib.suppress(Exception):
-            mlflow_run_id = mlflow.active_run().info.run_id if mlflow.active_run() else None
+        # Convergence = the epoch at which the best validation metric was reached
+        # (returned directly by the trainer), not final_epoch - patience.
+        convergence_epoch = result.get("best_epoch", result.get("final_epoch", config.epochs))
+
+        # MLflow run id is captured inside train() while the run is still active.
+        mlflow_run_id = result.get("mlflow_run_id")
 
         experiment_result = SyntheticExperimentResult(
             num_classes=config.num_classes,
             num_samples=config.num_samples_train,
             loss=loss_name,
             seed=seed,
-            best_val_loss=result.get("best_val_metric", float("inf")),
+            # All best_val_* from one re-validation of the best model (consistent
+            # regardless of which metric `monitor` selected on).
+            best_val_loss=val_metrics.get("loss", float("inf")),
             best_val_accuracy=val_metrics.get("accuracy", 0.0),
             best_val_f1=val_metrics.get("f1_macro", 0.0),
             best_val_auroc=val_metrics.get("auroc", 0.0),
+            test_accuracy=test_metrics.get("accuracy"),
+            test_f1=test_metrics.get("f1_macro"),
+            test_auroc=test_metrics.get("auroc"),
             final_epoch=result.get("final_epoch", 0),
             convergence_epoch=convergence_epoch,
             training_time_seconds=training_time,
-            checkpoint_path=str(result.get("best_checkpoint"))
-            if result.get("best_checkpoint")
-            else None,
+            # Durable MLflow artifact URI (the local temp path is deleted by cleanup()).
+            checkpoint_path=result.get("best_checkpoint_uri"),
             mlflow_run_id=mlflow_run_id,
             success=True,
         )
@@ -498,6 +513,10 @@ def print_synthetic_summary(results: list[SyntheticExperimentResult]) -> None:
 
     console.print("\n")
     console.rule("[bold blue]SYNTHETIC DATA EXPERIMENT SUMMARY[/bold blue]")
+
+    if not results:
+        console.print("[yellow]No results to summarize[/yellow]")
+        return
 
     # Group by loss function
     by_loss: dict[str, list[SyntheticExperimentResult]] = defaultdict(list)

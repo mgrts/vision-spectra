@@ -1,24 +1,31 @@
 """
-Tail truncation analysis for spectral experiments.
+Low-rank (Eckart-Young) truncation analysis for spectral experiments.
 
-This module implements experiments to test the effect of pruning heavy-tailed
-singular values on model performance. The hypothesis is that if heavy tails
-encode important features, truncating them should hurt accuracy.
+This module measures how much of a trained model's weight spectrum is actually
+needed for its accuracy. It applies Eckart-Young-Mirsky low-rank truncation —
+keeping the top-k LARGEST singular values and zeroing the SMALLEST ones — and
+records the accuracy change as a function of how many singular values are kept.
+
+Note:
+    This is standard low-rank truncation (it removes the smallest singular
+    values / the spectral bulk), NOT ablation of the heavy tail (the largest
+    singular values) in the random-matrix-theory sense.
 
 Experiment Design:
     1. Load a trained model
     2. For each weight matrix, compute SVD
-    3. Zero out singular values below various thresholds
-    4. Measure accuracy change
+    3. Zero out the smallest singular values (keep the top-k largest)
+    4. Measure the accuracy change as a function of the retention ratio
 
 Interpretation:
-    - Large accuracy drop → heavy tail carries important information
-    - Small accuracy drop → heavy tail is mostly noise
-    - This helps understand what heavy-tailed spectra represent
+    - Large accuracy drop under mild truncation → the smaller singular values
+      carry important information; the model uses a large effective rank.
+    - Small accuracy drop even under aggressive truncation → the smaller
+      singular values are largely redundant; the model is effectively low-rank.
 
 References:
     - Eckart-Young-Mirsky theorem: SVD gives optimal low-rank approximation
-    - Martin & Mahoney (2021): Heavy tails as implicit regularization
+    - Martin & Mahoney (2021): weight spectra and implicit regularization
 """
 
 from __future__ import annotations
@@ -371,26 +378,28 @@ def analyze_truncation_results(results: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _interpret_results(critical_threshold: float | None, sensitivities: list[float]) -> str:
-    """Generate human-readable interpretation of truncation results."""
+    """Generate a human-readable interpretation of low-rank truncation results."""
     if critical_threshold is None:
         return (
-            "Heavy tails appear to be noise: model is robust to significant truncation. "
-            "This suggests the heavy-tailed singular values do not encode critical features."
+            "Smaller singular values appear redundant: the model is robust to "
+            "aggressive low-rank truncation, so it is effectively low-rank and "
+            "relies mainly on its top singular components."
         )
     elif critical_threshold > 0.9:
         return (
-            "Heavy tails encode important features: accuracy drops quickly with truncation. "
-            "This suggests the network uses the full spectrum for representation."
+            "The full spectrum matters: accuracy drops as soon as a few of the "
+            "smaller singular values are removed, so the network uses a large "
+            "effective rank for its representation."
         )
     elif critical_threshold > 0.5:
         return (
-            "Moderate importance of heavy tails: some truncation is tolerated. "
-            "This suggests a mix of important and redundant singular values."
+            "Moderate spectral redundancy: some low-rank truncation is tolerated, "
+            "suggesting a mix of important and redundant singular values."
         )
     else:
         return (
-            "Heavy tails are mostly redundant: severe truncation is tolerated. "
-            "Only the top singular values appear to carry important information."
+            "Most singular values are redundant: severe low-rank truncation is "
+            "tolerated, and only the top singular values carry important information."
         )
 
 

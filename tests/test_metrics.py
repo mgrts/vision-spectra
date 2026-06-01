@@ -146,15 +146,16 @@ class TestAlphaExponent:
         assert abs(alpha) < 1.0
 
     def test_small_matrix(self):
-        """Test with small matrix (may return nan)."""
+        """A 4x4 matrix has too few singular values to fit, so it returns nan."""
         from vision_spectra.metrics import alpha_exponent
 
         W = np.random.randn(4, 4)
         result = alpha_exponent(W)
 
-        # Small matrices may not have enough data for fitting
-        # Result can be nan or finite
-        assert result is not None
+        # Documented contract: fewer than 8 singular values -> nan (a float),
+        # never None. (`assert result is not None` would be a tautology here.)
+        assert isinstance(result, float)
+        assert np.isnan(result)
 
 
 class TestHillAlpha:
@@ -173,14 +174,23 @@ class TestHillAlpha:
         assert alpha > 0
 
     def test_small_matrix(self):
-        """Test with small matrix."""
+        """A 5x5 matrix has fewer than 8 eigenvalues, so Hill returns nan."""
         from vision_spectra.metrics import power_law_alpha_hill
 
         W = np.random.randn(5, 5)
         result = power_law_alpha_hill(W)
 
-        # May return nan for very small matrices
-        assert result is not None
+        # Documented contract: n < 8 -> nan (a float), never None.
+        assert isinstance(result, float)
+        assert np.isnan(result)
+
+    def test_large_matrix_finite(self):
+        """A large matrix yields a finite Hill tail exponent (> 1)."""
+        from vision_spectra.metrics import power_law_alpha_hill
+
+        result = power_law_alpha_hill(np.random.randn(100, 100))
+        assert np.isfinite(result)
+        assert result > 1.0
 
 
 class TestGetSpectralMetrics:
@@ -254,7 +264,11 @@ class TestWeightExtraction:
         # Only blocks 0 and 2
         weights = extract_qkv_weights(model, layer_patterns=["blocks.0", "blocks.2"])
 
-        # Should only have weights from specified blocks
+        # The filter must actually select something (guard against vacuous pass)
+        # and must select EXACTLY blocks 0 and 2 — not over-select (e.g. block 2
+        # vs block 20+) nor under-select.
+        assert len(weights) > 0
+        assert {w.layer_idx for w in weights} == {0, 2}
         for w in weights:
             assert "blocks.0" in w.name or "blocks.2" in w.name
 
@@ -288,9 +302,11 @@ class TestNumericalStability:
 
         metrics = get_spectral_metrics(W)
 
-        # Should handle gracefully
+        # Should handle gracefully: every metric must be finite (no +/-inf).
+        # (The previous `not np.isnan(value) or np.isfinite(value)` parsed as
+        # `(not isnan) or isfinite`, which silently accepts infinities.)
         for value in metrics.values():
-            assert not np.isnan(value) or np.isfinite(value)
+            assert np.isfinite(value)
 
     def test_near_zero_matrix(self):
         """Test with near-zero matrix."""

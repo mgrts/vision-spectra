@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
+from loguru import logger
 
 if TYPE_CHECKING:
     from torch.utils.data import DataLoader
@@ -330,15 +331,25 @@ def save_mim_examples(
             # Get MIM outputs
             try:
                 loss, pred, mask = model(images)
-            except Exception:
+            except Exception as e:
                 # Model might not support MIM forward
+                logger.warning(f"MIM forward failed; skipping MIM examples: {e}")
                 return []
 
             # Get reconstructed images from model
             try:
+                if getattr(model, "norm_pix_loss", False):
+                    # pred is trained against PER-PATCH NORMALIZED targets, so
+                    # invert that normalization (using the originals' per-patch
+                    # mean/std) before unpatchify, otherwise the reconstructed
+                    # panel is meaningless.
+                    target = model.patchify(images)
+                    mean = target.mean(dim=-1, keepdim=True)
+                    var = target.var(dim=-1, keepdim=True)
+                    pred = pred * (var + 1e-6).sqrt() + mean
                 reconstructed = model.unpatchify(pred)
-            except Exception:
-                # Try to reconstruct manually if unpatchify not available
+            except Exception as e:
+                logger.warning(f"MIM reconstruction failed; skipping MIM examples: {e}")
                 return []
 
             originals.append(images.cpu())

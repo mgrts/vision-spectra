@@ -17,6 +17,7 @@ References:
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 import numpy as np
@@ -91,13 +92,22 @@ def compute_gradient_alignment(
     train_norm = np.linalg.norm(train_flat)
     rank_norm = np.linalg.norm(rank_flat)
 
-    if train_norm < 1e-10 or rank_norm < 1e-10:
+    # Treat non-finite norms (NaN/Inf gradients, common with AMP/divergence) and
+    # degenerate near-zero norms as "no measurement": return NaN so the layer is
+    # excluded from aggregation rather than masquerading as a real 0.0/90deg
+    # result that would poison the mean/min/max and the alignment fraction.
+    if (
+        not np.isfinite(train_norm)
+        or not np.isfinite(rank_norm)
+        or train_norm < 1e-10
+        or rank_norm < 1e-10
+    ):
         return GradientAlignmentResult(
             layer_name="",
-            cosine_similarity=0.0,
+            cosine_similarity=np.nan,
             training_grad_norm=float(train_norm),
             rank_reducing_grad_norm=float(rank_norm),
-            angle_degrees=90.0,
+            angle_degrees=np.nan,
             is_aligned=False,
         )
 
@@ -135,7 +145,10 @@ def analyze_model_gradient_alignment(
     results = []
 
     for name, param in model.named_parameters():
-        if layer_patterns and not any(pat in name for pat in layer_patterns):
+        # Boundary-aware match so "blocks.2" does not also select blocks 20-29.
+        if layer_patterns and not any(
+            re.search(rf"(?:^|\.){re.escape(pat)}(?:\.|$)", name) for pat in layer_patterns
+        ):
             continue
 
         if param.dim() != 2:
@@ -176,17 +189,30 @@ def aggregate_gradient_alignment(
             "angle_mean": np.nan,
         }
 
-    cos_sims = [r.cosine_similarity for r in results]
-    angles = [r.angle_degrees for r in results]
-    aligned_count = sum(1 for r in results if r.is_aligned)
+    # Exclude layers with no valid measurement (NaN cosine) so a single
+    # bad/zero-gradient layer cannot poison the aggregate statistics.
+    valid = [r for r in results if np.isfinite(r.cosine_similarity)]
+    if not valid:
+        return {
+            "cos_sim_mean": np.nan,
+            "cos_sim_std": np.nan,
+            "cos_sim_min": np.nan,
+            "cos_sim_max": np.nan,
+            "fraction_aligned": np.nan,
+            "angle_mean": np.nan,
+        }
+
+    cos_sims = [r.cosine_similarity for r in valid]
+    angles = [r.angle_degrees for r in valid if np.isfinite(r.angle_degrees)]
+    aligned_count = sum(1 for r in valid if r.is_aligned)
 
     return {
         "cos_sim_mean": float(np.mean(cos_sims)),
         "cos_sim_std": float(np.std(cos_sims)),
         "cos_sim_min": float(np.min(cos_sims)),
         "cos_sim_max": float(np.max(cos_sims)),
-        "fraction_aligned": float(aligned_count / len(results)),
-        "angle_mean": float(np.mean(angles)),
+        "fraction_aligned": float(aligned_count / len(valid)),
+        "angle_mean": float(np.mean(angles)) if angles else np.nan,
     }
 
 

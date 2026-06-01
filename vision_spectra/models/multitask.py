@@ -44,6 +44,11 @@ class MultitaskViT(nn.Module):
         self.embed_dim = encoder.embed_dim
         self.num_classes = encoder.num_classes
         self.image_size = encoder.image_size
+        if self.image_size % self.patch_size != 0:
+            raise ValueError(
+                f"image_size ({self.image_size}) must be divisible by patch_size "
+                f"({self.patch_size}) for MIM patchify/unpatchify to be exact."
+            )
         self.num_patches = (self.image_size // self.patch_size) ** 2
 
         # MIM decoder
@@ -70,6 +75,15 @@ class MultitaskViT(nn.Module):
         x = rearrange(imgs, "b c (h p1) (w p2) -> b (h w) (p1 p2 c)", p1=p, p2=p)
         return x
 
+    def unpatchify(self, x: torch.Tensor) -> torch.Tensor:
+        """Convert patches back to images (inverse of patchify)."""
+        from einops import rearrange
+
+        p = self.patch_size
+        h = w = self.image_size // p
+        c = self.num_channels
+        return rearrange(x, "b (h w) (p1 p2 c) -> b c (h p1) (w p2)", h=h, w=w, p1=p, p2=p, c=c)
+
     def random_masking(
         self,
         x: torch.Tensor,
@@ -77,7 +91,8 @@ class MultitaskViT(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Perform random masking on patch embeddings."""
         B, N, D = x.shape
-        num_keep = int(N * (1 - mask_ratio))
+        # Always keep >=1 visible AND mask >=1 patch, even for degenerate ratios.
+        num_keep = max(1, min(N - 1, int(N * (1 - mask_ratio))))
 
         noise = torch.rand(B, N, device=x.device)
         ids_shuffle = torch.argsort(noise, dim=1)
@@ -216,7 +231,8 @@ class MultitaskViT(nn.Module):
 
         loss = (pred - target) ** 2
         loss = loss.mean(dim=-1)
-        loss = (loss * mask).sum() / mask.sum()
+        # Clamp denominator so an all-visible mask yields 0 rather than NaN.
+        loss = (loss * mask).sum() / mask.sum().clamp(min=1.0)
 
         return loss
 

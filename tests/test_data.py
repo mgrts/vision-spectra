@@ -47,11 +47,14 @@ class TestSyntheticDataset:
         # Same labels
         assert np.array_equal(ds1.labels, ds2.labels)
 
-        # Same images (without transforms)
+        # Same images (without transforms): assert the pixel content is
+        # identical, not just the labels — this actually exercises the
+        # per-sample RNG seeding in _generate_image.
         img1, label1 = ds1[10]
         img2, label2 = ds2[10]
 
         assert label1 == label2
+        assert np.array_equal(np.array(img1), np.array(img2))
 
     def test_different_seeds_different_data(self):
         """Test that different seeds give different data."""

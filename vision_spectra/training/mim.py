@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 import mlflow
 import torch
 from loguru import logger
-from torch.cuda.amp import autocast
+from torch.amp import autocast
 from tqdm import tqdm
 
 from vision_spectra.training.base import BaseTrainer
@@ -96,14 +96,14 @@ class MIMTrainer(BaseTrainer):
 
             images = images.to(self.device, non_blocking=True)
 
-            # Warmup LR
-            self._warmup_lr(self.current_epoch, batch_idx, len(self.train_loader))
+            # Warmup LR (pass 0-based epoch so the ramp aligns with the scheduler gate)
+            self._warmup_lr(self.current_epoch - 1, batch_idx, len(self.train_loader))
 
             self.optimizer.zero_grad()
 
             # Forward pass
             if self.use_amp:
-                with autocast():
+                with autocast("cuda"):
                     loss, pred, mask = self.model(images, mask_ratio=self.mask_ratio)
 
                 self.scaler.scale(loss).backward()
@@ -155,7 +155,7 @@ class MIMTrainer(BaseTrainer):
                 images = images.to(self.device, non_blocking=True)
 
                 if self.use_amp:
-                    with autocast():
+                    with autocast("cuda"):
                         loss, pred, mask = self.model(images, mask_ratio=self.mask_ratio)
                 else:
                     loss, pred, mask = self.model(images, mask_ratio=self.mask_ratio)

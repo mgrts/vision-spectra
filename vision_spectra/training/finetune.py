@@ -19,6 +19,17 @@ if TYPE_CHECKING:
     from vision_spectra.settings import ExperimentConfig
 
 
+def _is_head_param(name: str) -> bool:
+    """Return True if a parameter name refers to the classification head.
+
+    The ViTClassifier head is the timm ``head`` linear (``encoder.head.*``). We
+    deliberately anchor on the ``head`` module name instead of a bare ``fc``
+    substring, because every transformer block's MLP is named ``mlp.fc1``/
+    ``mlp.fc2`` and must NOT be treated as the head.
+    """
+    return name.endswith(("head.weight", "head.bias")) or ".head." in name or "classifier" in name
+
+
 class FinetuneTrainer(ClassificationTrainer):
     """
     Trainer for finetuning a pretrained model.
@@ -70,42 +81,64 @@ class FinetuneTrainer(ClassificationTrainer):
             self.optimizer = self._create_layerwise_optimizer()
 
     def _load_pretrained(self, model: nn.Module, path: Path) -> None:
-        """Load pretrained weights from checkpoint."""
+        """Load pretrained encoder weights from a checkpoint.
+
+        MIM checkpoints are produced by ``MIMModel.state_dict()``. Because
+        ``MIMModel`` stores a ``ViTClassifier`` as ``self.encoder`` and the
+        ``ViTClassifier`` stores the timm backbone as ``self.encoder``, the
+        checkpoint keys are double-prefixed (``encoder.encoder.blocks.0...``).
+        The finetune target is a bare ``ViTClassifier`` whose params are
+        ``encoder.blocks.0...``, so the extra ``encoder.`` prefix is stripped
+        here. Only the classification head is skipped; transformer MLP layers
+        (``blocks.N.mlp.fc1/fc2``) are deliberately retained.
+        """
         logger.info(f"Loading pretrained weights from {path}")
 
-        checkpoint = torch.load(path, map_location="cpu")
+        # weights_only=False: checkpoints embed the full experiment config
+        # (Path/enum objects) and are produced by this trusted codebase.
+        checkpoint = torch.load(path, map_location="cpu", weights_only=False)
 
         state_dict = checkpoint.get("model_state_dict", checkpoint)
 
-        # Filter out classification head if present
         encoder_state = {}
         for k, v in state_dict.items():
-            # Skip classification head weights
-            if "head" in k or "classifier" in k or "fc" in k:
-                continue
-            # Handle MIM model: extract encoder weights
-            if k.startswith("encoder."):
-                encoder_state[k] = v
+            # Strip the MIM double-prefix: "encoder.encoder.X" -> "encoder.X"
+            if k.startswith("encoder.encoder."):
+                new_k = k[len("encoder.") :]
+            elif k.startswith("encoder."):
+                new_k = k
+            elif k.startswith(("decoder.", "decoder_pos_embed")):
+                continue  # MIM decoder, not part of the classifier
             else:
-                encoder_state[k] = v
+                new_k = "encoder." + k
 
-        # Load with strict=False to allow missing/extra keys
+            # Skip ONLY the classification head, not block-internal mlp.fc1/fc2
+            if _is_head_param(new_k):
+                continue
+            encoder_state[new_k] = v
+
+        # Load with strict=False to allow the (intentionally) missing head keys
         missing, unexpected = model.load_state_dict(encoder_state, strict=False)
+        matched = sum(1 for k in model.state_dict() if k in encoder_state)
 
-        if missing:
-            logger.warning(f"Missing keys in pretrained: {missing[:5]}...")
-        if unexpected:
-            logger.warning(f"Unexpected keys in pretrained: {unexpected[:5]}...")
+        if matched == 0:
+            raise RuntimeError(
+                f"No pretrained encoder weights matched the target model from {path}; "
+                "the checkpoint key layout may have changed."
+            )
 
-        logger.info("Pretrained weights loaded successfully")
+        logger.info(
+            f"Loaded {matched}/{len(model.state_dict())} params "
+            f"(missing={len(missing)}, unexpected={len(unexpected)})"
+        )
 
     def _freeze_encoder(self) -> None:
         """Freeze encoder weights, only train classification head."""
         logger.info("Freezing encoder weights")
 
         for name, param in self.model.named_parameters():
-            # Only train classification head
-            if "head" in name or "classifier" in name or "fc" in name:
+            # Only train classification head (encoder MLP fc1/fc2 stay frozen)
+            if _is_head_param(name):
                 param.requires_grad = True
             else:
                 param.requires_grad = False
@@ -124,7 +157,7 @@ class FinetuneTrainer(ClassificationTrainer):
             if not param.requires_grad:
                 continue
 
-            if "head" in name or "classifier" in name or "fc" in name:
+            if _is_head_param(name):
                 head_params.append(param)
             else:
                 encoder_params.append(param)

@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
-from torch.cuda.amp import autocast
+from torch.amp import autocast
 from torchmetrics import AUROC, Accuracy, F1Score
 from tqdm import tqdm
 
@@ -85,14 +85,14 @@ class ClassificationTrainer(BaseTrainer):
             images = images.to(self.device, non_blocking=True)
             targets = targets.to(self.device, non_blocking=True)
 
-            # Warmup LR
-            self._warmup_lr(self.current_epoch, batch_idx, len(self.train_loader))
+            # Warmup LR (pass 0-based epoch so the ramp aligns with the scheduler gate)
+            self._warmup_lr(self.current_epoch - 1, batch_idx, len(self.train_loader))
 
             self.optimizer.zero_grad()
 
             # Forward pass
             if self.use_amp:
-                with autocast():
+                with autocast("cuda"):
                     logits = self.model(images)
                     loss = self.criterion(logits, targets)
 
@@ -135,7 +135,16 @@ class ClassificationTrainer(BaseTrainer):
         }
 
     def validate(self) -> dict[str, float]:
-        """Run validation."""
+        """Run validation on the validation loader."""
+        return self.evaluate(self.val_loader)
+
+    def evaluate(self, loader: DataLoader) -> dict[str, float]:
+        """Evaluate the current model on an arbitrary loader.
+
+        Used for both validation and held-out test evaluation (call after
+        train(), which restores the best checkpoint, to get an unbiased
+        generalization estimate).
+        """
         self.model.eval()
         self.val_accuracy.reset()
         self.val_f1.reset()
@@ -144,12 +153,12 @@ class ClassificationTrainer(BaseTrainer):
         total_loss = 0.0
         num_batches = 0
 
-        max_batches = len(self.val_loader)
+        max_batches = len(loader)
         if self.config.training.smoke_test:
             max_batches = min(3, max_batches)
 
         with torch.no_grad():
-            for batch_idx, (images, targets) in enumerate(self.val_loader):
+            for batch_idx, (images, targets) in enumerate(loader):
                 if batch_idx >= max_batches:
                     break
 
@@ -157,7 +166,7 @@ class ClassificationTrainer(BaseTrainer):
                 targets = targets.to(self.device, non_blocking=True)
 
                 if self.use_amp:
-                    with autocast():
+                    with autocast("cuda"):
                         logits = self.model(images)
                         loss = self.criterion(logits, targets)
                 else:
@@ -179,11 +188,6 @@ class ClassificationTrainer(BaseTrainer):
             "f1_macro": self.val_f1.compute().item(),
             "auroc": self.val_auroc.compute().item(),
         }
-
-    def _is_best(self, val_metric: float) -> bool:
-        """For classification, higher accuracy is better."""
-        # We track val loss, so lower is still better
-        return val_metric < self.best_val_metric
 
     def cleanup(self) -> None:
         """Clean up resources including classification-specific objects."""

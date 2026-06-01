@@ -61,8 +61,12 @@ from vision_spectra.settings import (
     MLRUNS_DIR,
     DatasetConfig,
     DatasetName,
+    OptimizerConfig,
+    OptimizerName,
+    SchedulerName,
     set_seed,
 )
+from vision_spectra.training.base import build_optimizer, build_scheduler, warmup_factor
 
 # =============================================================================
 # CLI App
@@ -241,50 +245,48 @@ SCENARIO_CONFIGS = {
 # =============================================================================
 
 
+# Input resolution and patch size for the scenarios. patch_size=4 at 28px yields
+# a real 7x7=49-patch grid (50 tokens incl. CLS) and divides 28 exactly (no
+# discarded border); patch16 would collapse to a single 1x1 patch token.
+INPUT_IMAGE_SIZE = 28
+PATCH_SIZE = 4
+
+
 def create_model_for_scenario(
     scenario_config: ScenarioConfig,
     device: torch.device,
 ) -> torch.nn.Module:
     """
-    Create a model with the specified expressivity configuration.
+    Create the ViT for a scenario.
 
-    For Scenario C and D, we create a narrower/shallower model.
+    All six scenarios go through ONE parameterized path so the configured
+    (embed_dim, depth) are authoritative: A/B = 6 layers, C/D = 3, E/F = 1.
+    (Previously A/B silently used timm's default 12 layers because depth was not
+    passed.) patch_size=4 makes this a real ViT (49 patch tokens) rather than a
+    degenerate 1-patch model.
     """
     import timm
 
-    if scenario_config.scenario in (
-        ScenarioType.C_REDUCED_COMPLEX,
-        ScenarioType.D_REDUCED_SIMPLE,
-        ScenarioType.E_TINY_SIMPLE,
-        ScenarioType.F_TINY_COMPLEX,
-    ):
-        # Create a custom narrow/shallow ViT
-        # Using timm's flexibility to create custom configurations
-        model = timm.create_model(
-            "vit_tiny_patch16_224",
-            pretrained=False,
-            num_classes=scenario_config.num_classes,
-            in_chans=3,
-            img_size=28,
-            embed_dim=scenario_config.embed_dim,  # Reduced width
-            depth=scenario_config.depth,  # Reduced depth
-            num_heads=max(1, scenario_config.embed_dim // 32),  # Adjust heads
-            drop_rate=0.0,
-            attn_drop_rate=0.0,
-            drop_path_rate=0.1,
-        )
-    else:
-        # Standard ViT-Tiny for Scenarios A and B
-        model = timm.create_model(
-            scenario_config.model_name,
-            pretrained=False,
-            num_classes=scenario_config.num_classes,
-            in_chans=3,
-            img_size=28,
-            drop_rate=0.0,
-            attn_drop_rate=0.0,
-            drop_path_rate=0.1,
-        )
+    model = timm.create_model(
+        "vit_tiny_patch16_224",
+        pretrained=False,
+        num_classes=scenario_config.num_classes,
+        in_chans=3,
+        img_size=INPUT_IMAGE_SIZE,
+        patch_size=PATCH_SIZE,
+        embed_dim=scenario_config.embed_dim,
+        depth=scenario_config.depth,
+        num_heads=max(1, scenario_config.embed_dim // 32),
+        drop_rate=0.0,
+        attn_drop_rate=0.0,
+        drop_path_rate=0.1,
+    )
+
+    # Guard against silent config/architecture drift (the A/B depth=6-but-built-12 bug).
+    assert len(model.blocks) == scenario_config.depth, (
+        f"depth mismatch for scenario {scenario_config.scenario}: "
+        f"configured {scenario_config.depth}, built {len(model.blocks)}"
+    )
 
     return model.to(device)
 
@@ -488,15 +490,26 @@ def run_scenario_experiment(
                 dataset_obj = get_dataset(dataset_config, data_dir=DATA_DIR)
                 train_loader = dataset_obj.get_train_loader()
                 val_loader = dataset_obj.get_val_loader()
-                # test_loader available via dataset_obj.get_test_loader() if needed
+                test_loader = dataset_obj.get_test_loader()
 
-            # Setup loss and optimizer
+            # Setup loss, optimizer, and LR schedule using the SAME recipe as the
+            # other experiment families (build_optimizer/build_scheduler/
+            # warmup_factor) so the headline spectral study is not trained by a
+            # divergent loop (it previously had no scheduler, warmup, or grad
+            # clipping). A fixed epoch budget with NO early stopping is kept
+            # deliberately, so Δα is measured at a common endpoint across scenarios.
             criterion = torch.nn.CrossEntropyLoss()
-            optimizer = torch.optim.AdamW(
-                model.parameters(),
-                lr=config.learning_rate,
+            opt_config = OptimizerConfig(
+                name=OptimizerName.ADAMW,
+                learning_rate=config.learning_rate,
                 weight_decay=0.05,
+                scheduler=SchedulerName.COSINE,
+                warmup_epochs=5,
             )
+            optimizer = build_optimizer(model, opt_config)
+            scheduler = build_scheduler(optimizer, opt_config, config.epochs)
+            base_lrs = [g["lr"] for g in optimizer.param_groups]
+            grad_clip = 1.0
 
             # Track metrics history
             metrics_history: dict[int, dict[str, float]] = {}
@@ -523,16 +536,28 @@ def run_scenario_experiment(
                 train_correct = 0
                 train_total = 0
 
-                for images, labels in train_loader:
+                for step_idx, (images, labels) in enumerate(train_loader):
                     images = images.to(device)
                     labels = labels.to(device)
+                    # squeeze(-1) (not squeeze()) so a singleton [1, 1] batch
+                    # collapses to [1], not a 0-dim scalar that breaks the loss.
                     if labels.dim() > 1:
-                        labels = labels.squeeze()
+                        labels = labels.squeeze(-1)
 
                     optimizer.zero_grad()
                     outputs = model(images)
                     loss = criterion(outputs, labels)
                     loss.backward()
+
+                    # LR warmup (0-based epoch) + gradient clipping, matching the
+                    # shared trainer recipe.
+                    factor = warmup_factor(
+                        epoch - 1, step_idx, len(train_loader), opt_config.warmup_epochs
+                    )
+                    if factor is not None:
+                        for g, base in zip(optimizer.param_groups, base_lrs, strict=False):
+                            g["lr"] = base * factor
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
                     optimizer.step()
 
                     train_loss += loss.item()
@@ -553,7 +578,7 @@ def run_scenario_experiment(
                         images = images.to(device)
                         labels = labels.to(device)
                         if labels.dim() > 1:
-                            labels = labels.squeeze()
+                            labels = labels.squeeze(-1)
 
                         outputs = model(images)
                         _, predicted = outputs.max(1)
@@ -566,12 +591,17 @@ def run_scenario_experiment(
                 if val_accuracy > best_val_accuracy:
                     best_val_accuracy = val_accuracy
 
+                # Step the LR scheduler once warmup is over (epoch is 1-based).
+                if scheduler is not None and (epoch - 1) >= opt_config.warmup_epochs:
+                    scheduler.step()
+
                 # Log training metrics
                 mlflow.log_metrics(
                     {
                         "train/loss": avg_train_loss,
                         "train/accuracy": train_accuracy,
                         "val/accuracy": val_accuracy,
+                        "lr": optimizer.param_groups[0]["lr"],
                     },
                     step=epoch,
                 )
@@ -596,18 +626,43 @@ def run_scenario_experiment(
                         f"Val Acc={val_accuracy:.2f}%"
                     )
 
-            # Final spectral analysis
+            # Final spectral analysis. Also emit the metrics (not just artifacts)
+            # so the LAST logged spectral/* metric reflects the truly-final
+            # weights; otherwise downstream Δα would use a one-epoch-stale value.
             final_epoch = config.epochs
             if final_epoch not in metrics_history:
                 analysis = extract_and_analyze_weights(model, device)
                 metrics_history[final_epoch] = analysis["aggregated_metrics"]
                 log_spectral_artifacts(analysis, epoch=final_epoch)
 
+                for key, value in analysis["aggregated_metrics"].items():
+                    if np.isfinite(value):
+                        mlflow.log_metric(f"spectral/{key}", value, step=final_epoch)
+
+            # Held-out TEST accuracy on the final model: the unbiased
+            # generalization estimate (val accuracy is used only as a running
+            # diagnostic / for model comparison and is optimistically biased).
+            model.eval()
+            test_correct = 0
+            test_total = 0
+            with torch.no_grad():
+                for images, labels in test_loader:
+                    images = images.to(device)
+                    labels = labels.to(device)
+                    if labels.dim() > 1:
+                        labels = labels.squeeze(-1)
+                    outputs = model(images)
+                    _, predicted = outputs.max(1)
+                    test_total += labels.size(0)
+                    test_correct += predicted.eq(labels).sum().item()
+            test_accuracy = 100.0 * test_correct / max(test_total, 1)
+
             # Log final metrics
             mlflow.log_metrics(
                 {
                     "final/val_accuracy": best_val_accuracy,
                     "final/train_accuracy": train_accuracy,
+                    "final/test_accuracy": test_accuracy,
                 }
             )
 
@@ -615,7 +670,7 @@ def run_scenario_experiment(
 
             # Comprehensive cleanup to prevent resource leaks
             # Clean up DataLoaders first (releases multiprocessing workers)
-            cleanup_dataloaders(train_loader, val_loader)
+            cleanup_dataloaders(train_loader, val_loader, test_loader)
 
             # Clean up matplotlib to release figure file handles
             cleanup_matplotlib()
@@ -677,15 +732,10 @@ def run_scenario_experiment(
 
 
 def resolve_device(device_choice: DeviceChoice) -> torch.device:
-    """Resolve device choice to torch.device."""
-    if device_choice == DeviceChoice.AUTO:
-        if torch.cuda.is_available():
-            return torch.device("cuda")
-        elif torch.backends.mps.is_available():
-            return torch.device("mps")
-        else:
-            return torch.device("cpu")
-    return torch.device(device_choice.value)
+    """Resolve a DeviceChoice to a torch.device via the canonical resolver."""
+    from vision_spectra.settings import resolve_device as _resolve
+
+    return _resolve(device_choice.value)
 
 
 @app.command("scenario-a")

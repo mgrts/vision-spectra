@@ -20,7 +20,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from loguru import logger
-from torch.cuda.amp import GradScaler
+from torch.amp import GradScaler
 from torch.optim import SGD, Adam, AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau, StepLR
 from torch.utils.data import DataLoader
@@ -36,6 +36,68 @@ from vision_spectra.utils.visualization import save_prediction_examples
 
 if TYPE_CHECKING:
     from vision_spectra.settings import ExperimentConfig
+
+
+def build_optimizer(model: nn.Module, opt_config: Any) -> torch.optim.Optimizer:
+    """Build the optimizer from an OptimizerConfig.
+
+    Shared by BaseTrainer and the spectral-analysis runner so every experiment
+    family constructs the optimizer the same way.
+    """
+    params = model.parameters()
+    name = opt_config.name.value
+    if name == "adam":
+        return Adam(
+            params,
+            lr=opt_config.learning_rate,
+            betas=opt_config.betas,
+            weight_decay=opt_config.weight_decay,
+        )
+    elif name == "adamw":
+        return AdamW(
+            params,
+            lr=opt_config.learning_rate,
+            betas=opt_config.betas,
+            weight_decay=opt_config.weight_decay,
+        )
+    elif name == "sgd":
+        return SGD(
+            params,
+            lr=opt_config.learning_rate,
+            momentum=opt_config.momentum,
+            weight_decay=opt_config.weight_decay,
+        )
+    raise ValueError(f"Unknown optimizer: {opt_config.name}")
+
+
+def build_scheduler(optimizer: torch.optim.Optimizer, opt_config: Any, total_epochs: int):
+    """Build the LR scheduler from an OptimizerConfig (shared recipe)."""
+    sched = opt_config.scheduler.value
+    if sched == "cosine":
+        return CosineAnnealingLR(
+            optimizer,
+            # Clamp to >= 1 so warmup_epochs >= epochs cannot make T_max
+            # zero/negative (ZeroDivisionError in step()).
+            T_max=max(1, total_epochs - opt_config.warmup_epochs),
+            eta_min=opt_config.min_lr,
+        )
+    elif sched == "step":
+        return StepLR(optimizer, step_size=max(1, total_epochs // 3), gamma=0.1)
+    elif sched == "plateau":
+        return ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=5)
+    return None
+
+
+def warmup_factor(epoch: int, step: int, total_steps: int, warmup_epochs: int) -> float | None:
+    """Linear-warmup multiplier in [0, 1], or None if past warmup.
+
+    ``epoch`` is 0-based. Returns None once epoch >= warmup_epochs so the caller
+    can hand off to the scheduler with no gap/overlap.
+    """
+    if warmup_epochs <= 0 or epoch >= warmup_epochs:
+        return None
+    warmup_steps = max(1, warmup_epochs * total_steps)
+    return min(1.0, (epoch * total_steps + step + 1) / warmup_steps)
 
 
 class BaseTrainer(ABC):
@@ -75,12 +137,19 @@ class BaseTrainer(ABC):
 
         # Mixed precision
         self.use_amp = config.training.mixed_precision and self.device.type == "cuda"
-        self.scaler = GradScaler() if self.use_amp else None
+        self.scaler = GradScaler("cuda") if self.use_amp else None
 
-        # Training state
+        # Training state. The monitored metric determines the "best" direction:
+        # loss is lower-is-better; accuracy/auroc/f1 are higher-is-better.
         self.current_epoch = 0
-        self.best_val_metric = float("inf")  # Assume lower is better
+        self.monitor = config.training.monitor
+        self.monitor_lower_is_better = self.monitor == "loss"
+        self.best_val_metric = float("inf") if self.monitor_lower_is_better else float("-inf")
+        self.best_epoch = 0
         self.patience_counter = 0
+        # Per-group base LRs captured lazily on the first warmup step so that
+        # layer-wise LRs (e.g. finetune encoder vs head) survive warmup.
+        self._warmup_base_lrs: list[float] | None = None
 
         # Use a temporary directory for artifacts that will be logged to mlflow
         # This eliminates the need for a persistent 'runs' directory
@@ -109,71 +178,32 @@ class BaseTrainer(ABC):
 
     def _create_optimizer(self) -> torch.optim.Optimizer:
         """Create optimizer from config."""
-        opt_config = self.config.optimizer
-        params = self.model.parameters()
-
-        if opt_config.name.value == "adam":
-            return Adam(
-                params,
-                lr=opt_config.learning_rate,
-                betas=opt_config.betas,
-                weight_decay=opt_config.weight_decay,
-            )
-        elif opt_config.name.value == "adamw":
-            return AdamW(
-                params,
-                lr=opt_config.learning_rate,
-                betas=opt_config.betas,
-                weight_decay=opt_config.weight_decay,
-            )
-        elif opt_config.name.value == "sgd":
-            return SGD(
-                params,
-                lr=opt_config.learning_rate,
-                momentum=opt_config.momentum,
-                weight_decay=opt_config.weight_decay,
-            )
-        else:
-            raise ValueError(f"Unknown optimizer: {opt_config.name}")
+        return build_optimizer(self.model, self.config.optimizer)
 
     def _create_scheduler(self):
         """Create learning rate scheduler from config."""
-        opt_config = self.config.optimizer
-        total_epochs = self.config.training.epochs
-
-        if opt_config.scheduler.value == "cosine":
-            return CosineAnnealingLR(
-                self.optimizer,
-                T_max=total_epochs - opt_config.warmup_epochs,
-                eta_min=opt_config.min_lr,
-            )
-        elif opt_config.scheduler.value == "step":
-            return StepLR(
-                self.optimizer,
-                step_size=max(1, total_epochs // 3),
-                gamma=0.1,
-            )
-        elif opt_config.scheduler.value == "plateau":
-            return ReduceLROnPlateau(
-                self.optimizer,
-                mode="min",
-                factor=0.5,
-                patience=5,
-            )
-        else:
-            return None
+        return build_scheduler(self.optimizer, self.config.optimizer, self.config.training.epochs)
 
     def _warmup_lr(self, epoch: int, step: int, total_steps: int) -> None:
-        """Apply learning rate warmup."""
-        warmup_epochs = self.config.optimizer.warmup_epochs
+        """Linearly ramp the learning rate during warmup.
 
-        if epoch < warmup_epochs:
-            warmup_steps = warmup_epochs * total_steps
-            current_step = epoch * total_steps + step
-            lr = self.config.optimizer.learning_rate * current_step / warmup_steps
+        ``epoch`` must be 0-based (callers pass ``current_epoch - 1``) so the
+        ramp spans 0-based epochs ``[0, warmup_epochs)`` and the scheduler takes
+        over at ``epoch >= warmup_epochs`` with no gap/overlap. Each optimizer
+        param group is scaled relative to its OWN base LR, preserving layer-wise
+        ratios (e.g. finetune encoder vs head).
+        """
+        factor = warmup_factor(epoch, step, total_steps, self.config.optimizer.warmup_epochs)
+        if factor is None:
+            return
 
-            for param_group in self.optimizer.param_groups:
-                param_group["lr"] = lr
+        if self._warmup_base_lrs is None:
+            self._warmup_base_lrs = [g["lr"] for g in self.optimizer.param_groups]
+
+        for param_group, base_lr in zip(
+            self.optimizer.param_groups, self._warmup_base_lrs, strict=False
+        ):
+            param_group["lr"] = base_lr * factor
 
     @abstractmethod
     def train_epoch(self) -> dict[str, float]:
@@ -210,11 +240,16 @@ class BaseTrainer(ABC):
         mlflow.set_tracking_uri(str(self.config.output_dir))
         mlflow.set_experiment(self.config.name)
 
-        with mlflow.start_run():
+        with mlflow.start_run() as run:
+            # Capture the run id while the run is active; callers cannot get it
+            # afterwards because the context manager ends the run on exit.
+            run_id = run.info.run_id
+
             # Log config
             mlflow.log_params(self.config.to_flat_dict())
 
             best_checkpoint = None
+            stopped_early = False
 
             # Log spectral metrics BEFORE training (epoch -1 represents pre-training state)
             if self.config.spectral.enabled:
@@ -274,12 +309,16 @@ class BaseTrainer(ABC):
                 # Log learning rate
                 mlflow.log_metric("lr", self.optimizer.param_groups[0]["lr"], step=epoch)
 
-                # Checkpointing
-                val_metric = val_metrics.get("loss", val_metrics.get("accuracy", 0))
+                # Checkpointing on the configured monitor metric (falls back to
+                # loss, then accuracy, if the monitor key is absent).
+                val_metric = val_metrics.get(
+                    self.monitor, val_metrics.get("loss", val_metrics.get("accuracy", 0.0))
+                )
                 is_best = self._is_best(val_metric)
 
                 if is_best:
                     self.best_val_metric = val_metric
+                    self.best_epoch = self.current_epoch
                     best_checkpoint = self._save_checkpoint("best.pt")
                     self.patience_counter = 0
 
@@ -297,6 +336,7 @@ class BaseTrainer(ABC):
                     and self.patience_counter >= self.config.training.patience
                 ):
                     logger.info(f"Early stopping at epoch {epoch}")
+                    stopped_early = True
                     break
 
                 # Logging
@@ -312,9 +352,23 @@ class BaseTrainer(ABC):
                     logger.info("Smoke test complete")
                     break
 
-            # Log best checkpoint
+            # The last training epoch reached (capture before best-model reload,
+            # which rewinds self.current_epoch to the best epoch).
+            final_epoch = self.current_epoch
+
+            # Log best checkpoint and capture a DURABLE reference to it. The
+            # local best_checkpoint path lives in a temp dir that cleanup()
+            # deletes, so consumers should use the MLflow artifact URI instead.
+            best_checkpoint_uri = None
             if best_checkpoint:
                 mlflow.log_artifact(str(best_checkpoint))
+                best_checkpoint_uri = mlflow.get_artifact_uri("best.pt")
+
+                # Restore the best-epoch weights so any post-training evaluation
+                # (e.g. the runner's validate() call) reflects the BEST model,
+                # not the last epoch. The file still exists here (cleanup runs
+                # later in the caller's finally block).
+                self.load_checkpoint(best_checkpoint)
 
             # Save spectral distribution history and plots
             if (
@@ -348,7 +402,11 @@ class BaseTrainer(ABC):
             return {
                 "best_val_metric": self.best_val_metric,
                 "best_checkpoint": best_checkpoint,
-                "final_epoch": self.current_epoch,
+                "best_checkpoint_uri": best_checkpoint_uri,
+                "best_epoch": self.best_epoch,
+                "final_epoch": final_epoch,
+                "stopped_early": stopped_early,
+                "mlflow_run_id": run_id,
                 "spectral_tracker": self.spectral_tracker,
             }
 
@@ -416,9 +474,14 @@ class BaseTrainer(ABC):
         return result
 
     def _is_best(self, val_metric: float) -> bool:
-        """Check if current validation metric is best."""
-        # Lower is better for loss
-        return val_metric < self.best_val_metric
+        """Check if the current validation metric improves on the best so far.
+
+        Direction follows the configured monitor: loss is lower-is-better;
+        accuracy/auroc/f1 are higher-is-better.
+        """
+        if self.monitor_lower_is_better:
+            return val_metric < self.best_val_metric
+        return val_metric > self.best_val_metric
 
     def _save_prediction_examples(self, num_examples: int = 16) -> None:
         """
@@ -595,7 +658,9 @@ class BaseTrainer(ABC):
 
     def load_checkpoint(self, path: Path) -> None:
         """Load model checkpoint."""
-        state = torch.load(path, map_location=self.device)
+        # weights_only=False: checkpoints embed the full experiment config
+        # (Path/enum objects); under torch>=2.6 the default would raise.
+        state = torch.load(path, map_location=self.device, weights_only=False)
 
         self.model.load_state_dict(state["model_state_dict"])
         self.optimizer.load_state_dict(state["optimizer_state_dict"])

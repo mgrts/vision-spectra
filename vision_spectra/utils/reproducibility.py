@@ -1,60 +1,19 @@
 """
 Reproducibility utilities.
+
+``set_seed`` and ``get_device`` are the single canonical implementations defined
+in ``vision_spectra.settings`` and re-exported here for convenience, so there is
+only one copy of each to maintain.
 """
 
 from __future__ import annotations
 
-import contextlib
-import os
-import random
-
-import numpy as np
 import torch
 
+from vision_spectra.settings import resolve_device as get_device
+from vision_spectra.settings import set_seed
 
-def set_seed(seed: int, deterministic: bool = True) -> None:
-    """
-    Set random seeds for reproducibility.
-
-    Args:
-        seed: Random seed
-        deterministic: Enable deterministic operations (slower but reproducible)
-    """
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    os.environ["PYTHONHASHSEED"] = str(seed)
-
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
-
-        if deterministic:
-            torch.backends.cudnn.deterministic = True
-            torch.backends.cudnn.benchmark = False
-            # Enable deterministic algorithms
-            with contextlib.suppress(Exception):
-                torch.use_deterministic_algorithms(True, warn_only=True)
-
-
-def get_device(device: str = "auto") -> torch.device:
-    """
-    Get PyTorch device.
-
-    Args:
-        device: Device specification ('auto', 'cpu', 'cuda', 'mps')
-
-    Returns:
-        torch.device instance
-    """
-    if device == "auto":
-        if torch.cuda.is_available():
-            return torch.device("cuda")
-        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-            return torch.device("mps")
-        return torch.device("cpu")
-
-    return torch.device(device)
+__all__ = ["set_seed", "get_device", "count_parameters"]
 
 
 def count_parameters(model: torch.nn.Module, trainable_only: bool = True) -> int:

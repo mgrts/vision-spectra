@@ -43,6 +43,7 @@ class ViTClassifier(nn.Module):
         embed_dim: int | None = None,
         depth: int | None = None,
         num_heads: int | None = None,
+        patch_size: int | None = None,
     ) -> None:
         super().__init__()
 
@@ -61,6 +62,11 @@ class ViTClassifier(nn.Module):
             "attn_drop_rate": attn_drop_rate,
             "drop_path_rate": drop_path_rate,
         }
+
+        # Override the patch size (e.g. patch_size=4 turns the default
+        # vit_*_patch16 into a real 7x7=49-patch grid at 28px instead of 1 patch).
+        if patch_size is not None:
+            model_kwargs["patch_size"] = patch_size
 
         # Add optional architecture customization for expressivity control
         if embed_dim is not None:
@@ -120,13 +126,13 @@ class ViTClassifier(nn.Module):
 
     def get_patch_embeddings(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Get patch embeddings including CLS token.
+        Get raw patch embeddings (no CLS token, no positional embedding).
 
         Args:
             x: Input images [B, C, H, W]
 
         Returns:
-            Patch embeddings [B, num_patches+1, embed_dim]
+            Patch embeddings [B, num_patches, embed_dim]
         """
         return self.encoder.patch_embed(x)
 
@@ -142,16 +148,12 @@ class ViTClassifier(nn.Module):
         """
         attention_weights = []
 
-        # Get patch embeddings
+        # Build the token sequence exactly as the encoder does so prefix tokens
+        # (CLS, register tokens), positional embeddings, no_embed_class ordering,
+        # and dynamic_img_size resampling all match the real forward pass.
+        # (_pos_embed applies pos_drop internally in timm.)
         x = self.encoder.patch_embed(x)
-
-        # Add CLS token
-        cls_token = self.encoder.cls_token.expand(x.shape[0], -1, -1)
-        x = torch.cat([cls_token, x], dim=1)
-
-        # Add position embeddings
-        x = x + self.encoder.pos_embed
-        x = self.encoder.pos_drop(x)
+        x = self.encoder._pos_embed(x)
 
         # Forward through blocks and collect attention
         for blk in self.encoder.blocks:
@@ -210,6 +212,7 @@ def create_vit_classifier(
         embed_dim=embed_dim,
         depth=depth,
         num_heads=num_heads,
+        patch_size=config.patch_size,
     )
 
 

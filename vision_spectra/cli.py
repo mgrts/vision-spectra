@@ -23,6 +23,8 @@ from vision_spectra.analysis.publication_figures import app as figures_app
 from vision_spectra.experiments.run_classification_experiments import (
     app as experiments_app,
 )
+from vision_spectra.experiments.run_spectral_analysis import app as spectral_app
+from vision_spectra.experiments.run_synthetic_experiments import app as synthetic_app
 
 app = typer.Typer(
     name="vision-spectra",
@@ -37,10 +39,26 @@ app.add_typer(experiments_app, name="experiments")
 # Add figures generation as a sub-command group
 app.add_typer(figures_app, name="figures")
 
+# Expose the spectral-analysis (6-scenario) and synthetic experiment suites
+# through the installed CLI too (previously runnable only via `python -m ...`).
+app.add_typer(spectral_app, name="spectral")
+app.add_typer(synthetic_app, name="synthetic")
+
 
 # =============================================================================
 # Common Options
 # =============================================================================
+
+
+def _passed(ctx: typer.Context, param: str) -> bool:
+    """Return True if the user explicitly passed ``param`` on the command line.
+
+    Used to overlay CLI options on top of a YAML ``--config`` without letting
+    option *defaults* clobber values the YAML set (CLI > YAML > defaults).
+    """
+    from click.core import ParameterSource
+
+    return ctx.get_parameter_source(param) == ParameterSource.COMMANDLINE
 
 
 def version_callback(value: bool) -> None:
@@ -71,6 +89,7 @@ def main(
 
 @app.command("train-cls")
 def train_classification(
+    ctx: typer.Context,
     dataset: str = typer.Option("pathmnist", "--dataset", "-d", help="Dataset name"),
     loss: str = typer.Option("cross_entropy", "--loss", "-l", help="Loss function"),
     epochs: int = typer.Option(50, "--epochs", "-e", help="Number of epochs"),
@@ -112,6 +131,35 @@ def train_classification(
         cfg.training.epochs = epochs
         cfg.training.smoke_test = smoke_test
         cfg.model.name = model
+
+    # When a YAML config is supplied, still honor any CLI flags the user
+    # explicitly passed (CLI > YAML, as documented). Option defaults are NOT
+    # applied here, so they never silently clobber values set in the YAML.
+    if config is not None:
+        if _passed(ctx, "name"):
+            cfg.name = name
+        if _passed(ctx, "seed"):
+            cfg.seed = seed
+        if _passed(ctx, "device"):
+            cfg.device = device
+        if _passed(ctx, "data_dir"):
+            cfg.data_dir = data_dir
+        if _passed(ctx, "output_dir"):
+            cfg.output_dir = output_dir
+        if _passed(ctx, "dataset"):
+            cfg.dataset.name = DatasetName(dataset)
+        if _passed(ctx, "batch_size"):
+            cfg.dataset.batch_size = batch_size
+        if _passed(ctx, "loss"):
+            cfg.loss.classification = LossName(loss)
+        if _passed(ctx, "lr"):
+            cfg.optimizer.learning_rate = lr
+        if _passed(ctx, "epochs"):
+            cfg.training.epochs = epochs
+        if _passed(ctx, "smoke_test"):
+            cfg.training.smoke_test = smoke_test
+        if _passed(ctx, "model"):
+            cfg.model.name = model
 
     # Set seed
     set_seed(cfg.seed)
@@ -159,12 +207,15 @@ def train_classification(
 
 @app.command("pretrain-mim")
 def pretrain_mim(
+    ctx: typer.Context,
     dataset: str = typer.Option("pathmnist", "--dataset", "-d", help="Dataset name"),
     epochs: int = typer.Option(100, "--epochs", "-e", help="Number of epochs"),
     batch_size: int = typer.Option(64, "--batch-size", "-b", help="Batch size"),
     lr: float = typer.Option(1e-4, "--lr", help="Learning rate"),
     mask_ratio: float = typer.Option(0.75, "--mask-ratio", help="Masking ratio"),
-    model: str = typer.Option("vit_tiny_patch16_224", "--model", "-m", help="Model name"),
+    model: str = typer.Option(
+        "vit_small_patch14_dinov2.lvd142m", "--model", "-m", help="Model name"
+    ),
     seed: int = typer.Option(42, "--seed", "-s", help="Random seed"),
     device: str = typer.Option("auto", "--device", help="Device"),
     name: str = typer.Option("mim_pretrain", "--name", "-n", help="Experiment name"),
@@ -199,6 +250,32 @@ def pretrain_mim(
         cfg.training.smoke_test = smoke_test
         cfg.model.name = model
         cfg.model.mask_ratio = mask_ratio
+
+    if config is not None:
+        if _passed(ctx, "name"):
+            cfg.name = name
+        if _passed(ctx, "seed"):
+            cfg.seed = seed
+        if _passed(ctx, "device"):
+            cfg.device = device
+        if _passed(ctx, "data_dir"):
+            cfg.data_dir = data_dir
+        if _passed(ctx, "output_dir"):
+            cfg.output_dir = output_dir
+        if _passed(ctx, "dataset"):
+            cfg.dataset.name = DatasetName(dataset)
+        if _passed(ctx, "batch_size"):
+            cfg.dataset.batch_size = batch_size
+        if _passed(ctx, "lr"):
+            cfg.optimizer.learning_rate = lr
+        if _passed(ctx, "epochs"):
+            cfg.training.epochs = epochs
+        if _passed(ctx, "smoke_test"):
+            cfg.training.smoke_test = smoke_test
+        if _passed(ctx, "model"):
+            cfg.model.name = model
+        if _passed(ctx, "mask_ratio"):
+            cfg.model.mask_ratio = mask_ratio
 
     set_seed(cfg.seed)
 
@@ -246,6 +323,7 @@ def pretrain_mim(
 
 @app.command("finetune")
 def finetune(
+    ctx: typer.Context,
     checkpoint: Path = typer.Argument(..., help="Path to pretrained checkpoint"),
     dataset: str = typer.Option("pathmnist", "--dataset", "-d", help="Dataset name"),
     loss: str = typer.Option("cross_entropy", "--loss", "-l", help="Loss function"),
@@ -295,6 +373,30 @@ def finetune(
         cfg.training.epochs = epochs
         cfg.training.smoke_test = smoke_test
 
+    if config is not None:
+        if _passed(ctx, "name"):
+            cfg.name = name
+        if _passed(ctx, "seed"):
+            cfg.seed = seed
+        if _passed(ctx, "device"):
+            cfg.device = device
+        if _passed(ctx, "data_dir"):
+            cfg.data_dir = data_dir
+        if _passed(ctx, "output_dir"):
+            cfg.output_dir = output_dir
+        if _passed(ctx, "dataset"):
+            cfg.dataset.name = DatasetName(dataset)
+        if _passed(ctx, "batch_size"):
+            cfg.dataset.batch_size = batch_size
+        if _passed(ctx, "loss"):
+            cfg.loss.classification = LossName(loss)
+        if _passed(ctx, "lr"):
+            cfg.optimizer.learning_rate = lr
+        if _passed(ctx, "epochs"):
+            cfg.training.epochs = epochs
+        if _passed(ctx, "smoke_test"):
+            cfg.training.smoke_test = smoke_test
+
     set_seed(cfg.seed)
 
     logger.info(f"Starting finetuning from {checkpoint}")
@@ -340,6 +442,7 @@ def finetune(
 
 @app.command("train-mtl")
 def train_multitask(
+    ctx: typer.Context,
     dataset: str = typer.Option("pathmnist", "--dataset", "-d", help="Dataset name"),
     loss: str = typer.Option("cross_entropy", "--loss", "-l", help="Classification loss"),
     cls_weight: float = typer.Option(1.0, "--cls-weight", help="Classification loss weight"),
@@ -348,7 +451,9 @@ def train_multitask(
     epochs: int = typer.Option(50, "--epochs", "-e", help="Number of epochs"),
     batch_size: int = typer.Option(64, "--batch-size", "-b", help="Batch size"),
     lr: float = typer.Option(1e-4, "--lr", help="Learning rate"),
-    model: str = typer.Option("vit_tiny_patch16_224", "--model", "-m", help="Model name"),
+    model: str = typer.Option(
+        "vit_small_patch14_dinov2.lvd142m", "--model", "-m", help="Model name"
+    ),
     seed: int = typer.Option(42, "--seed", "-s", help="Random seed"),
     device: str = typer.Option("auto", "--device", help="Device"),
     name: str = typer.Option("mtl_experiment", "--name", "-n", help="Experiment name"),
@@ -387,6 +492,38 @@ def train_multitask(
         cfg.training.smoke_test = smoke_test
         cfg.model.name = model
         cfg.model.mask_ratio = mask_ratio
+
+    if config is not None:
+        if _passed(ctx, "name"):
+            cfg.name = name
+        if _passed(ctx, "seed"):
+            cfg.seed = seed
+        if _passed(ctx, "device"):
+            cfg.device = device
+        if _passed(ctx, "data_dir"):
+            cfg.data_dir = data_dir
+        if _passed(ctx, "output_dir"):
+            cfg.output_dir = output_dir
+        if _passed(ctx, "dataset"):
+            cfg.dataset.name = DatasetName(dataset)
+        if _passed(ctx, "batch_size"):
+            cfg.dataset.batch_size = batch_size
+        if _passed(ctx, "loss"):
+            cfg.loss.classification = LossName(loss)
+        if _passed(ctx, "cls_weight"):
+            cfg.loss.mtl_cls_weight = cls_weight
+        if _passed(ctx, "mim_weight"):
+            cfg.loss.mtl_mim_weight = mim_weight
+        if _passed(ctx, "lr"):
+            cfg.optimizer.learning_rate = lr
+        if _passed(ctx, "epochs"):
+            cfg.training.epochs = epochs
+        if _passed(ctx, "smoke_test"):
+            cfg.training.smoke_test = smoke_test
+        if _passed(ctx, "model"):
+            cfg.model.name = model
+        if _passed(ctx, "mask_ratio"):
+            cfg.model.mask_ratio = mask_ratio
 
     set_seed(cfg.seed)
 
@@ -473,8 +610,10 @@ def evaluate(
 
     logger.info(f"Evaluating {checkpoint} on {dataset} ({split})")
 
-    # Load config from checkpoint
-    ckpt = torch.load(checkpoint, map_location=device_obj)
+    # Load config from checkpoint. weights_only=False because checkpoints embed
+    # the full experiment config (Path/enum objects) and are produced by this
+    # trusted codebase; under torch>=2.6 the default weights_only=True would fail.
+    ckpt = torch.load(checkpoint, map_location=device_obj, weights_only=False)
 
     cfg = ExperimentConfig()
     cfg.dataset.name = DatasetName(dataset)

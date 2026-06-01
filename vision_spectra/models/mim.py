@@ -207,6 +207,11 @@ class MIMModel(nn.Module):
 
         # Calculate number of patches
         self.image_size = encoder.image_size
+        if self.image_size % self.patch_size != 0:
+            raise ValueError(
+                f"image_size ({self.image_size}) must be divisible by patch_size "
+                f"({self.patch_size}) for MIM patchify/unpatchify to be exact."
+            )
         self.num_patches = (self.image_size // self.patch_size) ** 2
 
         # Create decoder
@@ -275,7 +280,9 @@ class MIMModel(nn.Module):
             ids_restore: Indices to restore order [B, N]
         """
         B, N, D = x.shape
-        num_keep = int(N * (1 - mask_ratio))
+        # Clamp so there is always >=1 visible AND >=1 masked patch, even for
+        # degenerate mask_ratio values (0.0 or 1.0).
+        num_keep = max(1, min(N - 1, int(N * (1 - mask_ratio))))
 
         # Random noise for shuffling
         noise = torch.rand(B, N, device=x.device)
@@ -385,8 +392,9 @@ class MIMModel(nn.Module):
         loss = (pred - target) ** 2
         loss = loss.mean(dim=-1)  # [B, N]
 
-        # Average over masked patches
-        loss = (loss * mask).sum() / mask.sum()
+        # Average over masked patches (clamp denominator so an all-visible mask
+        # yields 0 rather than NaN).
+        loss = (loss * mask).sum() / mask.sum().clamp(min=1.0)
 
         return loss
 

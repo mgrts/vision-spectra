@@ -84,7 +84,9 @@ def load_checkpoint(
     if not path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {path}")
 
-    checkpoint = torch.load(path, map_location=device)
+    # weights_only=False: checkpoints embed the full experiment config
+    # (Path/enum objects); under torch>=2.6 the default would raise.
+    checkpoint = torch.load(path, map_location=device, weights_only=False)
 
     # Load model
     missing, unexpected = model.load_state_dict(

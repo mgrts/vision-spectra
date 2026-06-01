@@ -31,7 +31,7 @@ Usage:
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -125,6 +125,13 @@ class ScenarioMetrics:
     stable_rank_initial_mean: float
     stable_rank_final_mean: float
     num_runs: int
+    # Hill ESD tail exponent (the metric that actually matches the cited
+    # Martin & Mahoney heavy-tail theory; alpha_exponent above is a rank-decay
+    # slope, a different quantity). Surfaced alongside so both are reported.
+    hill_initial_mean: float = float("nan")
+    hill_final_mean: float = float("nan")
+    delta_hill_mean: float = float("nan")
+    delta_hill_values: list[float] = field(default_factory=list)
 
 
 SCENARIO_METADATA: dict[str, dict[str, str]] = {
@@ -181,9 +188,14 @@ def extract_scenario_metrics(scenario: str) -> ScenarioMetrics | None:
         logger.warning(f"No finished runs for experiment '{experiment_name}'")
         return None
 
-    # Get accuracy from final/val_accuracy or val/accuracy
+    # Prefer the held-out TEST accuracy (unbiased) when present, then fall back
+    # to the (optimistically biased) best-validation accuracy for older runs.
     accuracy_col = None
-    for col in ["metrics.final/val_accuracy", "metrics.val/accuracy"]:
+    for col in [
+        "metrics.final/test_accuracy",
+        "metrics.final/val_accuracy",
+        "metrics.val/accuracy",
+    ]:
         if col in runs.columns:
             accuracy_col = col
             break
@@ -197,6 +209,9 @@ def extract_scenario_metrics(scenario: str) -> ScenarioMetrics | None:
     sr_initial_values = []
     sr_final_values = []
     delta_alpha_values = []
+    hill_initial_values = []
+    hill_final_values = []
+    delta_hill_values = []
 
     for _, row in runs.iterrows():
         run_id = row["run_id"]
@@ -238,13 +253,44 @@ def extract_scenario_metrics(scenario: str) -> ScenarioMetrics | None:
         except Exception as e:
             logger.warning(f"Could not get stable rank history for run {run_id}: {e}")
 
+        # Get Hill ESD tail-exponent history (the theory-matching metric).
+        try:
+            hill_history = client.get_metric_history(run_id, "spectral/pl_alpha_hill_mean")
+            if hill_history:
+                hill_history = sorted(hill_history, key=lambda x: x.step)
+                hill_init = hill_history[0].value
+                hill_final = hill_history[-1].value
+                hill_initial_values.append(hill_init)
+                hill_final_values.append(hill_final)
+                delta_hill_values.append(hill_final - hill_init)
+        except Exception as e:
+            logger.warning(f"Could not get Hill history for run {run_id}: {e}")
+
+    # The spectral aggregates below are backed only by runs that have a logged
+    # spectral history, which may be fewer than the finished-run count reported
+    # as num_runs. Warn when they disagree so the displayed sample size is not
+    # silently mistaken for the statistical n behind Δα / α / stable-rank.
+    if len(delta_alpha_values) != len(runs):
+        logger.warning(
+            f"{scenario}: {len(runs)} finished runs but only "
+            f"{len(delta_alpha_values)} have spectral history; "
+            "Δα / alpha / stable-rank and t-tests use the smaller set."
+        )
+
     # Compute aggregated values
     alpha_initial_mean = float(np.mean(alpha_initial_values)) if alpha_initial_values else np.nan
     alpha_final_mean = float(np.mean(alpha_final_values)) if alpha_final_values else np.nan
     delta_alpha_mean = float(np.mean(delta_alpha_values)) if delta_alpha_values else np.nan
-    delta_alpha_std = float(np.std(delta_alpha_values)) if delta_alpha_values else np.nan
+    # Sample std (ddof=1) to match accuracy_std (pandas .std default) instead of
+    # population std; needs >=2 values.
+    delta_alpha_std = (
+        float(np.std(delta_alpha_values, ddof=1)) if len(delta_alpha_values) >= 2 else np.nan
+    )
     sr_initial_mean = float(np.mean(sr_initial_values)) if sr_initial_values else np.nan
     sr_final_mean = float(np.mean(sr_final_values)) if sr_final_values else np.nan
+    hill_initial_mean = float(np.mean(hill_initial_values)) if hill_initial_values else np.nan
+    hill_final_mean = float(np.mean(hill_final_values)) if hill_final_values else np.nan
+    delta_hill_mean = float(np.mean(delta_hill_values)) if delta_hill_values else np.nan
 
     metadata = SCENARIO_METADATA.get(scenario, {"name": scenario, "description": ""})
 
@@ -262,6 +308,10 @@ def extract_scenario_metrics(scenario: str) -> ScenarioMetrics | None:
         stable_rank_initial_mean=sr_initial_mean,
         stable_rank_final_mean=sr_final_mean,
         num_runs=len(runs),
+        hill_initial_mean=hill_initial_mean,
+        hill_final_mean=hill_final_mean,
+        delta_hill_mean=delta_hill_mean,
+        delta_hill_values=delta_hill_values,
     )
 
 
@@ -329,7 +379,8 @@ def generate_delta_alpha_bar(
 
     scenarios = sorted(metrics.keys())
     delta_alphas = [metrics[s].delta_alpha_mean for s in scenarios]
-    delta_stds = [metrics[s].delta_alpha_std for s in scenarios]
+    # 95% CI half-widths (not +/-1 SD) so the bars convey a confidence interval.
+    delta_cis = [_ci95_halfwidth(metrics[s].delta_alpha_values) for s in scenarios]
     colors = [SCENARIO_COLORS.get(s, "#333333") for s in scenarios]
 
     fig, ax = plt.subplots(figsize=(12, 6))
@@ -337,16 +388,16 @@ def generate_delta_alpha_bar(
     bars = ax.bar(
         scenarios,
         delta_alphas,
-        yerr=delta_stds,
+        yerr=delta_cis,
         color=colors,
         edgecolor="black",
         capsize=5,
     )
 
-    for bar, val, _std in zip(bars, delta_alphas, delta_stds, strict=False):
+    for bar, val, _ci in zip(bars, delta_alphas, delta_cis, strict=False):
         if np.isfinite(val):
             ax.annotate(
-                f"+{val:.3f}",
+                f"{val:+.3f}",
                 xy=(bar.get_x() + bar.get_width() / 2, bar.get_height()),
                 xytext=(0, 3),
                 textcoords="offset points",
@@ -355,10 +406,16 @@ def generate_delta_alpha_bar(
                 fontsize=10,
             )
 
-    ax.axhline(y=0.3, color="red", linestyle="--", alpha=0.7, label="Heavy-tail threshold")
+    ax.axhline(
+        y=0.3,
+        color="red",
+        linestyle="--",
+        alpha=0.7,
+        label="Reference line (Δα=0.3, not a derived threshold)",
+    )
     ax.set_xlabel("Scenario", fontsize=12)
-    ax.set_ylabel("Δα (Delta Alpha)", fontsize=12)
-    ax.set_title("Spectral Compression Across Experimental Scenarios", fontsize=14)
+    ax.set_ylabel("Δα (rank-decay slope change; error bars = 95% CI)", fontsize=12)
+    ax.set_title("Spectral Compression (Δα rank-decay slope) Across Scenarios", fontsize=14)
     ax.legend(loc="upper right")
 
     ax2 = ax.secondary_xaxis("top")
@@ -398,10 +455,18 @@ def generate_accuracy_vs_compression(
                 fontsize=12,
             )
 
-    ax.axvline(x=0.3, color="red", linestyle="--", alpha=0.7, label="Heavy-tail threshold")
-    ax.set_xlabel("Δα (Spectral Compression)", fontsize=12)
-    ax.set_ylabel("Validation Accuracy (%)", fontsize=12)
-    ax.set_title("Accuracy vs Spectral Compression", fontsize=14)
+    ax.axvline(
+        x=0.3,
+        color="red",
+        linestyle="--",
+        alpha=0.7,
+        label="Reference line (Δα=0.3, not a derived threshold)",
+    )
+    ax.set_xlabel("Δα (rank-decay slope change)", fontsize=12)
+    ax.set_ylabel("Accuracy (%, test if available)", fontsize=12)
+    ax.set_title(
+        "Accuracy vs Δα (observational; both co-vary with capacity/complexity)", fontsize=14
+    )
     ax.legend(loc="best", fontsize=9)
 
     return save_figure(fig, "accuracy_vs_compression", output_dir, fmt)
@@ -425,7 +490,7 @@ def generate_heatmap(
             if scenario in metrics:
                 val = metrics[scenario].delta_alpha_mean
                 data[i, j] = val if np.isfinite(val) else 0
-                labels[i][j] = f"{scenario}\n+{val:.3f}" if np.isfinite(val) else scenario
+                labels[i][j] = f"{scenario}\n{val:+.3f}" if np.isfinite(val) else scenario
             else:
                 labels[i][j] = f"{scenario}\n—"
 
@@ -504,51 +569,79 @@ def generate_stable_rank(
 # =============================================================================
 
 
+def _ci95_halfwidth(values: list[float]) -> float:
+    """95% CI half-width of the mean (t-interval, df=n-1). 0 if <2 finite values.
+
+    Used so figure error bars show a confidence interval rather than +/-1 SD
+    (which, at n=3, understates uncertainty by ~2.5x).
+    """
+    arr = np.asarray([v for v in values if np.isfinite(v)], dtype=float)
+    n = len(arr)
+    if n < 2:
+        return 0.0
+    return float(stats.t.ppf(0.975, df=n - 1) * np.std(arr, ddof=1) / np.sqrt(n))
+
+
 def perform_statistical_tests(metrics: dict[str, ScenarioMetrics]) -> list[dict]:
-    """Perform pairwise statistical tests between scenarios."""
-    results = []
+    """Pairwise statistical comparison of Δα between scenarios.
 
-    test_pairs = [
-        ("A", "B"),
-        ("D", "C"),
-        ("E", "F"),
-        ("B", "C"),
-        ("C", "F"),
-        ("A", "F"),
-    ]
+    IMPORTANT: with the default n=3 seeds these tests are severely underpowered
+    and the Δα signal is near-deterministic, so raw p-values are extraordinarily
+    small for reasons of seed-determinism, NOT generalizability. They are
+    reported as DESCRIPTIVE only. A Holm-Bonferroni family-wise correction is
+    applied across the comparison family, and effect sizes (Cohen's d) are
+    reported alongside. The t-statistic uses the (group2 - group1) convention so
+    its sign matches mean_diff.
+    """
+    test_pairs = [("A", "B"), ("D", "C"), ("E", "F"), ("B", "C"), ("C", "F"), ("A", "F")]
 
+    raw: list[dict] = []
     for s1, s2 in test_pairs:
         if s1 not in metrics or s2 not in metrics:
             continue
-
-        vals1 = metrics[s1].delta_alpha_values
-        vals2 = metrics[s2].delta_alpha_values
-
+        vals1 = np.asarray(metrics[s1].delta_alpha_values, dtype=float)
+        vals2 = np.asarray(metrics[s2].delta_alpha_values, dtype=float)
         if len(vals1) < 2 or len(vals2) < 2:
             continue
 
-        t_stat, p_value = stats.ttest_ind(vals1, vals2)
-        diff = np.mean(vals2) - np.mean(vals1)
-        significant = bool(p_value < 0.05)
-
-        interpretation = "No significant difference"
-        if significant and diff > 0:
-            interpretation = f"{s2} has significantly higher compression"
-        elif significant and diff < 0:
-            interpretation = f"{s1} has significantly higher compression"
-
-        results.append(
+        t_stat, p_value = stats.ttest_ind(vals2, vals1)
+        diff = float(np.mean(vals2) - np.mean(vals1))
+        n1, n2 = len(vals1), len(vals2)
+        pooled = np.sqrt(
+            ((n1 - 1) * np.var(vals1, ddof=1) + (n2 - 1) * np.var(vals2, ddof=1)) / (n1 + n2 - 2)
+        )
+        cohens_d = float(diff / pooled) if pooled > 1e-12 else 0.0
+        raw.append(
             {
                 "comparison": f"{s1} vs {s2}",
-                "mean_diff": float(diff),
+                "n_per_group": int(min(n1, n2)),
+                "mean_diff": diff,
                 "t_statistic": float(t_stat),
+                "cohens_d": cohens_d,
                 "p_value": float(p_value),
-                "significant": significant,
-                "interpretation": interpretation,
             }
         )
 
-    return results
+    # Holm-Bonferroni correction across the comparison family (monotone, capped at 1).
+    m = len(raw)
+    running_max = 0.0
+    for rank, idx in enumerate(sorted(range(m), key=lambda i: raw[i]["p_value"])):
+        corrected = min(1.0, (m - rank) * raw[idx]["p_value"])
+        running_max = max(running_max, corrected)
+        raw[idx]["p_value_corrected"] = float(running_max)
+
+    for r in raw:
+        s1, s2 = r["comparison"].split(" vs ")
+        r["significant"] = bool(r["p_value_corrected"] < 0.05)
+        n = r["n_per_group"]
+        if r["significant"] and r["mean_diff"] > 0:
+            r["interpretation"] = f"{s2} higher Δα (descriptive, n={n}/group)"
+        elif r["significant"] and r["mean_diff"] < 0:
+            r["interpretation"] = f"{s1} higher Δα (descriptive, n={n}/group)"
+        else:
+            r["interpretation"] = f"n.s. after Holm correction (n={n}/group)"
+
+    return raw
 
 
 # =============================================================================
@@ -659,9 +752,22 @@ def summary(
                 ),
             },
             "delta_alpha": {
+                "metric": "rank-decay slope of singular values (NOT the M&M ESD tail exponent)",
                 "mean": (float(m.delta_alpha_mean) if np.isfinite(m.delta_alpha_mean) else None),
                 "std": (float(m.delta_alpha_std) if np.isfinite(m.delta_alpha_std) else None),
                 "values": [float(v) for v in m.delta_alpha_values],
+            },
+            "hill_alpha": {
+                "metric": "Hill ESD tail exponent (matches Martin & Mahoney heavy-tail theory)",
+                "initial_mean": (
+                    float(m.hill_initial_mean) if np.isfinite(m.hill_initial_mean) else None
+                ),
+                "final_mean": (
+                    float(m.hill_final_mean) if np.isfinite(m.hill_final_mean) else None
+                ),
+                "delta_mean": (
+                    float(m.delta_hill_mean) if np.isfinite(m.delta_hill_mean) else None
+                ),
             },
             "stable_rank": {
                 "initial_mean": (
@@ -702,7 +808,7 @@ def summary(
         acc_str = f"{m.accuracy_mean:.1f}%" if np.isfinite(m.accuracy_mean) else "—"
         alpha_i_str = f"{m.alpha_initial_mean:.3f}" if np.isfinite(m.alpha_initial_mean) else "—"
         alpha_f_str = f"{m.alpha_final_mean:.3f}" if np.isfinite(m.alpha_final_mean) else "—"
-        da_str = f"+{m.delta_alpha_mean:.3f}" if np.isfinite(m.delta_alpha_mean) else "—"
+        da_str = f"{m.delta_alpha_mean:+.3f}" if np.isfinite(m.delta_alpha_mean) else "—"
         sr_str = (
             f"{m.stable_rank_initial_mean:.1f}→{m.stable_rank_final_mean:.1f}"
             if np.isfinite(m.stable_rank_initial_mean) and np.isfinite(m.stable_rank_final_mean)
@@ -743,7 +849,7 @@ def generate_table_image(
         acc = f"{m.accuracy_mean:.1f}" if np.isfinite(m.accuracy_mean) else "—"
         alpha_i = f"{m.alpha_initial_mean:.3f}" if np.isfinite(m.alpha_initial_mean) else "—"
         alpha_f = f"{m.alpha_final_mean:.3f}" if np.isfinite(m.alpha_final_mean) else "—"
-        da = f"+{m.delta_alpha_mean:.3f}" if np.isfinite(m.delta_alpha_mean) else "—"
+        da = f"{m.delta_alpha_mean:+.3f}" if np.isfinite(m.delta_alpha_mean) else "—"
         sr_i = (
             f"{m.stable_rank_initial_mean:.1f}" if np.isfinite(m.stable_rank_initial_mean) else "—"
         )
@@ -859,7 +965,7 @@ Scenario & Configuration & Acc (\%) & $\alpha_{init}$ & $\alpha_{final}$ & $\Del
         acc = f"{m.accuracy_mean:.1f}" if np.isfinite(m.accuracy_mean) else "—"
         alpha_i = f"{m.alpha_initial_mean:.3f}" if np.isfinite(m.alpha_initial_mean) else "—"
         alpha_f = f"{m.alpha_final_mean:.3f}" if np.isfinite(m.alpha_final_mean) else "—"
-        da = f"+{m.delta_alpha_mean:.3f}" if np.isfinite(m.delta_alpha_mean) else "—"
+        da = f"{m.delta_alpha_mean:+.3f}" if np.isfinite(m.delta_alpha_mean) else "—"
         sr_i = (
             f"{m.stable_rank_initial_mean:.1f}" if np.isfinite(m.stable_rank_initial_mean) else "—"
         )
@@ -1119,7 +1225,7 @@ def generate_all(
         acc_str = f"{m.accuracy_mean:.1f}%" if np.isfinite(m.accuracy_mean) else "—"
         alpha_i_str = f"{m.alpha_initial_mean:.3f}" if np.isfinite(m.alpha_initial_mean) else "—"
         alpha_f_str = f"{m.alpha_final_mean:.3f}" if np.isfinite(m.alpha_final_mean) else "—"
-        da_str = f"+{m.delta_alpha_mean:.3f}" if np.isfinite(m.delta_alpha_mean) else "—"
+        da_str = f"{m.delta_alpha_mean:+.3f}" if np.isfinite(m.delta_alpha_mean) else "—"
         sr_str = (
             f"{m.stable_rank_initial_mean:.1f}→{m.stable_rank_final_mean:.1f}"
             if np.isfinite(m.stable_rank_initial_mean) and np.isfinite(m.stable_rank_final_mean)

@@ -58,7 +58,11 @@ class FocalLoss(nn.Module):
 
     Args:
         gamma: Focusing parameter (default: 2.0)
-        alpha: Class weights tensor or None for uniform
+        alpha: Per-class weighting. Pass a 1-D tensor of shape [num_classes] for
+            genuine per-class balancing (indexed by target). A scalar float, by
+            contrast, only rescales the whole loss by a constant and provides NO
+            per-class balancing (it does not change the optimisation direction);
+            use a tensor if class balancing is intended. None = uniform.
         reduction: 'mean', 'sum', or 'none'
     """
 

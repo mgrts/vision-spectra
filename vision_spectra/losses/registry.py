@@ -19,9 +19,12 @@ from vision_spectra.losses.classification import (
     LabelSmoothingLoss,
 )
 from vision_spectra.losses.reconstruction import (
+    CauchyLoss,
+    HuberLoss,
     L1Loss,
     MSELoss,
     SmoothL1Loss,
+    TukeyLoss,
 )
 
 if TYPE_CHECKING:
@@ -37,11 +40,17 @@ LOSS_REGISTRY: dict[str, type[nn.Module]] = {
     "asymmetric": AsymmetricLoss,
 }
 
-# MIM loss registry
+# MIM reconstruction loss registry. Includes the robust losses (Huber, Cauchy,
+# Tukey) so they are reachable from config rather than dead exports. SGTLoss is
+# intentionally omitted: it has required shape parameters with no sensible
+# zero-arg default.
 MIM_LOSS_REGISTRY: dict[str, type[nn.Module]] = {
     "mse": MSELoss,
     "l1": L1Loss,
     "smooth_l1": SmoothL1Loss,
+    "huber": HuberLoss,
+    "cauchy": CauchyLoss,
+    "tukey": TukeyLoss,
 }
 
 

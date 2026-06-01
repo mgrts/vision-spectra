@@ -60,8 +60,20 @@ def compare_groups(
     group1 = np.asarray(group1).flatten()
     group2 = np.asarray(group2).flatten()
 
-    group1 = group1[np.isfinite(group1)]
-    group2 = group2[np.isfinite(group2)]
+    # For a paired comparison the two arrays must stay aligned, so drop pairs
+    # jointly by a shared finite mask (filtering each array independently would
+    # silently desync the pairs). Unpaired comparisons filter independently.
+    if paired:
+        if len(group1) != len(group2):
+            raise ValueError(
+                f"paired=True requires equal-length groups, got "
+                f"{len(group1)} and {len(group2)}"
+            )
+        mask = np.isfinite(group1) & np.isfinite(group2)
+        group1, group2 = group1[mask], group2[mask]
+    else:
+        group1 = group1[np.isfinite(group1)]
+        group2 = group2[np.isfinite(group2)]
 
     if len(group1) < 2 or len(group2) < 2:
         return ComparisonResult(
@@ -86,24 +98,38 @@ def compare_groups(
     s1, s2 = float(np.std(group1, ddof=1)), float(np.std(group2, ddof=1))
     diff = m2 - m1
 
-    if paired and len(group1) == len(group2):
-        t_stat, p_ttest = stats.ttest_rel(group1, group2)
+    # Run tests as (group2, group1) so the t-statistic sign matches
+    # diff = m2 - m1 and cohens_d (both expressed as "group2 minus group1").
+    # Two-sided p-values are unaffected by argument order.
+    if paired:
+        t_stat, p_ttest = stats.ttest_rel(group2, group1)
     else:
-        t_stat, p_ttest = stats.ttest_ind(group1, group2)
+        t_stat, p_ttest = stats.ttest_ind(group2, group1)  # Student (equal_var=True)
 
     p_wilcoxon = None
     try:
-        if paired and len(group1) == len(group2):
-            _, p_wilcoxon = stats.wilcoxon(group1, group2)
+        if paired:
+            _, p_wilcoxon = stats.wilcoxon(group2, group1)
         else:
-            _, p_wilcoxon = stats.mannwhitneyu(group1, group2, alternative="two-sided")
+            _, p_wilcoxon = stats.mannwhitneyu(group2, group1, alternative="two-sided")
     except Exception:
         pass
 
     d = cohens_d(group1, group2)
 
-    se_diff = np.sqrt(s1**2 / len(group1) + s2**2 / len(group2))
-    t_crit = stats.t.ppf(0.975, df=len(group1) + len(group2) - 2)
+    # 95% CI for diff = m2 - m1, kept consistent with the test that produced p.
+    n1, n2 = len(group1), len(group2)
+    if paired:
+        # Paired CI: based on the SD of the per-pair differences.
+        d_pairs = group2 - group1
+        sd_diff = float(np.std(d_pairs, ddof=1))
+        se_diff = sd_diff / np.sqrt(n1)
+        t_crit = stats.t.ppf(0.975, df=n1 - 1)
+    else:
+        # Pooled-variance SE to match the Student (equal_var=True) t-test.
+        sp = np.sqrt(((n1 - 1) * s1**2 + (n2 - 1) * s2**2) / (n1 + n2 - 2))
+        se_diff = sp * np.sqrt(1.0 / n1 + 1.0 / n2)
+        t_crit = stats.t.ppf(0.975, df=n1 + n2 - 2)
     ci_lower = diff - t_crit * se_diff
     ci_upper = diff + t_crit * se_diff
 
@@ -140,13 +166,16 @@ def compare_scenarios(
                 values1 = scenario_results[s1].get(metric, [])
                 values2 = scenario_results[s2].get(metric, [])
                 if values1 and values2:
+                    # Use the (more powerful) paired test only when the scenarios
+                    # have matching run counts; otherwise pairing is undefined, so
+                    # fall back to an unpaired comparison instead of erroring.
                     result = compare_groups(
                         np.array(values1),
                         np.array(values2),
                         group1_name=s1,
                         group2_name=s2,
                         metric_name=metric,
-                        paired=True,
+                        paired=len(values1) == len(values2),
                     )
                     results[(s1, s2, metric)] = result
     return results

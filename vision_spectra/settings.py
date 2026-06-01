@@ -3,13 +3,13 @@ Centralized configuration using Pydantic settings.
 
 Supports configuration via:
 1. CLI arguments (highest priority)
-2. YAML/TOML config files
-3. Environment variables (prefixed with VISION_SPECTRA_)
-4. Default values
+2. YAML config files
+3. Default values
 """
 
 from __future__ import annotations
 
+import contextlib
 import os
 import random
 from enum import Enum
@@ -19,8 +19,7 @@ from typing import Any, Literal
 import numpy as np
 import torch
 import yaml
-from pydantic import BaseModel, Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 # =============================================================================
 # Path Configuration
@@ -72,6 +71,9 @@ class MIMLossName(str, Enum):
     MSE = "mse"
     L1 = "l1"
     SMOOTH_L1 = "smooth_l1"
+    HUBER = "huber"
+    CAUCHY = "cauchy"
+    TUKEY = "tukey"
 
 
 class OptimizerName(str, Enum):
@@ -96,7 +98,21 @@ class SchedulerName(str, Enum):
 # =============================================================================
 
 
-class DatasetConfig(BaseModel):
+class _StrictModel(BaseModel):
+    """Base for all config models.
+
+    - ``extra="forbid"``: unknown / misplaced YAML keys raise a ValidationError
+      instead of being silently dropped (which would otherwise corrupt
+      experiments by silently using defaults).
+    - ``validate_assignment=True``: field constraints (e.g. ``0 < mask_ratio <
+      1``) are re-checked on attribute assignment, so CLI/runtime overrides
+      fail fast with a clear error rather than reaching the model degenerate.
+    """
+
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+
+
+class DatasetConfig(_StrictModel):
     """Dataset configuration."""
 
     name: DatasetName = Field(default=DatasetName.PATHMNIST, description="Dataset name")
@@ -118,11 +134,17 @@ class DatasetConfig(BaseModel):
     num_samples_test: int = Field(default=1000, gt=0, description="Test samples (synthetic)")
 
 
-class ModelConfig(BaseModel):
+class ModelConfig(_StrictModel):
     """Model configuration."""
 
     name: str = Field(
         default="vit_small_patch14_dinov2.lvd142m", description="Model name from timm"
+    )
+    patch_size: int | None = Field(
+        default=None,
+        gt=0,
+        description="Override the timm model's patch size. With 28px inputs, "
+        "patch_size=4 gives a real 7x7=49-patch grid; None uses the model default.",
     )
     pretrained: bool = Field(default=False, description="Use pretrained weights")
     drop_rate: float = Field(default=0.0, ge=0, le=1, description="Dropout rate")
@@ -136,7 +158,7 @@ class ModelConfig(BaseModel):
     decoder_num_heads: int = Field(default=4, gt=0, description="MIM decoder heads")
 
 
-class LossConfig(BaseModel):
+class LossConfig(_StrictModel):
     """Loss function configuration."""
 
     # Classification loss
@@ -155,7 +177,7 @@ class LossConfig(BaseModel):
     mtl_mim_weight: float = Field(default=0.5, ge=0, description="MIM weight in MTL")
 
 
-class OptimizerConfig(BaseModel):
+class OptimizerConfig(_StrictModel):
     """Optimizer configuration."""
 
     name: OptimizerName = Field(default=OptimizerName.ADAMW)
@@ -170,7 +192,7 @@ class OptimizerConfig(BaseModel):
     min_lr: float = Field(default=1e-6, ge=0, description="Minimum LR")
 
 
-class TrainingConfig(BaseModel):
+class TrainingConfig(_StrictModel):
     """Training configuration."""
 
     epochs: int = Field(default=100, gt=0, description="Number of epochs")
@@ -185,11 +207,19 @@ class TrainingConfig(BaseModel):
     early_stopping: bool = Field(default=True, description="Enable early stopping")
     patience: int = Field(default=15, gt=0, description="Early stopping patience")
 
+    # Checkpoint-selection / early-stopping monitor. For a fair loss-function
+    # comparison, monitor a loss-agnostic metric (accuracy/auroc) so different
+    # losses' incomparable loss scales don't select checkpoints at different
+    # points on different trajectories.
+    monitor: Literal["loss", "accuracy", "auroc", "f1_macro"] = Field(
+        default="loss", description="Validation metric used to select the best model"
+    )
+
     # Smoke test mode
     smoke_test: bool = Field(default=False, description="Quick test mode")
 
 
-class SpectralConfig(BaseModel):
+class SpectralConfig(_StrictModel):
     """Spectral metrics configuration."""
 
     enabled: bool = Field(default=True, description="Enable spectral logging")
@@ -223,7 +253,7 @@ class SpectralConfig(BaseModel):
     extract_patch_embed: bool = Field(default=True, description="Extract patch embedding")
 
 
-class ExperimentConfig(BaseModel):
+class ExperimentConfig(_StrictModel):
     """Complete experiment configuration."""
 
     # Experiment metadata
@@ -244,14 +274,8 @@ class ExperimentConfig(BaseModel):
     data_dir: Path = Field(default=DATA_DIR, description="Data directory")
 
     def get_device(self) -> torch.device:
-        """Resolve device."""
-        if self.device == "auto":
-            if torch.cuda.is_available():
-                return torch.device("cuda")
-            elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-                return torch.device("mps")
-            return torch.device("cpu")
-        return torch.device(self.device)
+        """Resolve the configured device string to a torch.device."""
+        return resolve_device(self.device)
 
     @classmethod
     def from_yaml(cls, path: Path) -> ExperimentConfig:
@@ -292,8 +316,23 @@ def _flatten_dict(d: dict, parent_key: str = "", sep: str = ".") -> dict:
 
 
 # =============================================================================
-# Reproducibility
+# Device / Reproducibility
 # =============================================================================
+
+
+def resolve_device(device: str = "auto") -> torch.device:
+    """Resolve a device string ('auto'/'cpu'/'cuda'/'mps') to a torch.device.
+
+    The single canonical device resolver for the whole project (auto ->
+    cuda -> mps -> cpu).
+    """
+    if device == "auto":
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            return torch.device("mps")
+        return torch.device("cpu")
+    return torch.device(device)
 
 
 def set_seed(seed: int, deterministic: bool = True) -> None:
@@ -316,26 +355,10 @@ def set_seed(seed: int, deterministic: bool = True) -> None:
         if deterministic:
             torch.backends.cudnn.deterministic = True
             torch.backends.cudnn.benchmark = False
-            # Enable deterministic algorithms where available
+
+    # torch.use_deterministic_algorithms is a GLOBAL setting that also governs
+    # CPU/MPS op determinism, so it must NOT be gated on CUDA availability
+    # (otherwise deterministic=True is a no-op on the Mac/CPU dev path).
+    if deterministic:
+        with contextlib.suppress(Exception):
             torch.use_deterministic_algorithms(True, warn_only=True)
-
-
-# =============================================================================
-# Environment-based Settings
-# =============================================================================
-
-
-class EnvSettings(BaseSettings):
-    """Settings loaded from environment variables."""
-
-    model_config = SettingsConfigDict(
-        env_prefix="VISION_SPECTRA_",
-        env_file=".env",
-        extra="ignore",
-    )
-
-    seed: int = 42
-    device: str = "auto"
-    data_dir: Path = DATA_DIR
-    output_dir: Path = MLRUNS_DIR
-    mlflow_tracking_uri: Path = MLRUNS_DIR

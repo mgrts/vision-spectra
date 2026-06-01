@@ -20,9 +20,12 @@ All computations use float64 precision and are done on CPU for stability.
 
 Scientific Background:
     Neural network weight matrices often exhibit power-law singular value
-    distributions. The exponent of this distribution correlates with model
-    capacity and generalization. Well-trained models typically show α values
-    between 2 and 6, with higher values indicating more implicit regularization.
+    distributions. NOTE on terminology: ``alpha_exponent`` below is a RANK-DECAY
+    slope (fit of log σ_i vs log rank), whose values for the ViT widths here lie
+    roughly in ~0.2-1.0. The Martin & Mahoney "α between 2 and 6" range refers to
+    the DISTRIBUTIONAL ESD tail index estimated by a Hill / power-law fit, which
+    is a different quantity (see ``power_law_alpha_hill``). Do not interpret the
+    rank-decay slope using the M&M "2-6" band.
 
 References:
     [1] Martin, C. H., & Mahoney, M. W. (2021). "Implicit Self-Regularization
@@ -199,10 +202,12 @@ def alpha_exponent(
     Interpretation:
         - α ≈ 0: Flat spectrum, all singular values roughly equal (high entropy)
         - α > 0: Decaying spectrum, larger singular values dominate
-        - α ≈ 1: Slow decay, many significant components
-        - α ≈ 2-4: Moderate decay, typical for trained neural networks
-        - α > 4: Rapid decay, low effective rank, strong implicit regularization
-        - Well-trained models typically have α between 2 and 6
+        - Larger α: faster singular-value decay / lower effective rank
+
+        This is a RANK-DECAY slope, not the Martin & Mahoney ESD tail index. For
+        the ViT widths studied here it typically lies in ~0.2-1.0; the M&M
+        "α between 2 and 6" band applies to the distributional Hill exponent
+        (see power_law_alpha_hill), NOT to this metric.
 
     Args:
         weight_matrix: 2D numpy array of shape [m, n]
@@ -452,7 +457,9 @@ def aggregate_spectral_metrics(
 
         if values:
             result[f"{key}_mean"] = float(np.mean(values))
-            result[f"{key}_std"] = float(np.std(values))
+            # Sample std (ddof=1) for consistency with the seed-level / accuracy
+            # stats elsewhere; needs >=2 values, else 0.0.
+            result[f"{key}_std"] = float(np.std(values, ddof=1)) if len(values) > 1 else 0.0
         else:
             result[f"{key}_mean"] = np.nan
             result[f"{key}_std"] = np.nan
@@ -825,7 +832,10 @@ class SpectralTracker:
                         singular_values=sv,
                         eigenvalues=sv**2,
                         normalized_sv=sv / sv[0] if sv[0] > 0 else sv,
-                        cumulative_variance=np.cumsum(sv**2) / sv.sum() ** 2
+                        # Variance is explained by SQUARED singular values, so
+                        # the normalizer is sum-of-squares (Σσ²), not the square
+                        # of the sum ((Σσ)²) — matching get_spectral_distribution.
+                        cumulative_variance=np.cumsum(sv**2) / (sv**2).sum()
                         if sv.sum() > 0
                         else np.zeros_like(sv),
                         metrics=d.get("metrics", {}),
