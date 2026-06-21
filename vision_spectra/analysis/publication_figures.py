@@ -1068,6 +1068,23 @@ def statistical_tests_cmd(
         console.print(f"\n[green]Saved to {output_file}[/green]")
 
 
+@app.command("study")
+def study_cmd(
+    output_format: OutputFormat = typer.Option(OutputFormat.BOTH, "--format", "-o"),
+) -> None:
+    """Generate only the capacity-sweep / alignment / truncation study figures."""
+    from vision_spectra.analysis.study_figures import generate_study_figures
+
+    console.print("[bold blue]═══ Study (capacity-sweep) Figures ═══[/bold blue]\n")
+    saved = generate_study_figures(output_format)
+    n = sum(len(v) for v in saved.values())
+    if n == 0:
+        console.print("[red]No study (sweep) cells found in MLflow.[/red]")
+        console.print("Run:  vision-spectra spectral run-study --tier 1")
+        raise typer.Exit(1)
+    console.print(f"[green]✓ Generated {n} files in {get_output_dir()}[/green]")
+
+
 @app.command("all")
 def generate_all(
     output_dir: Path | None = typer.Option(
@@ -1086,15 +1103,25 @@ def generate_all(
     """Generate all publication outputs: figures, tables, summary, and stats."""
     console.print("[bold blue]═══ Generating All Publication Outputs ═══[/bold blue]\n")
 
+    from vision_spectra.analysis.study_figures import generate_study_figures
+
     metrics = extract_all_scenarios()
 
     if not metrics:
-        console.print("[red]No experiment data found in MLflow![/red]")
-        console.print("Run experiments first with:")
+        # No A-F grid (e.g. a Tier-1 run-study). Still emit the sweep figures.
         console.print(
-            "  poetry run python -m vision_spectra.experiments.run_spectral_analysis run-all"
+            "[yellow]No A-F scenario data found; generating study (sweep) figures only.[/yellow]"
         )
-        raise typer.Exit(1)
+        study_saved = generate_study_figures(output_format)
+        n = sum(len(v) for v in study_saved.values())
+        if n == 0:
+            console.print("[red]No experiment data found in MLflow![/red]")
+            console.print(
+                "Run experiments first, e.g.:  vision-spectra spectral run-study --tier 1"
+            )
+            raise typer.Exit(1)
+        console.print(f"[green]✓ Generated {n} study figure files in {get_output_dir()}[/green]")
+        return
 
     console.print(
         f"[green]Found data for {len(metrics)} scenarios: {', '.join(sorted(metrics.keys()))}[/green]\n"
@@ -1187,6 +1214,16 @@ def generate_all(
             json.dump(stats_results, f, indent=2, cls=NumpyEncoder)
         all_saved_files.append(stats_path)
         logger.info(f"Saved {stats_path}")
+
+    # 5. Study (capacity-sweep / alignment / truncation) figures, if any sweep cells exist.
+    console.print("\n[bold]5. Study (capacity-sweep) figures[/bold]")
+    study_saved = generate_study_figures(output_format, output_dir=out_dir)
+    for paths in study_saved.values():
+        all_saved_files.extend(paths)
+    if study_saved:
+        console.print(
+            f"   [green]• {sum(len(p) for p in study_saved.values())} sweep figure files[/green]"
+        )
 
     # Summary
     console.print("\n[bold blue]═══ Summary ═══[/bold blue]")

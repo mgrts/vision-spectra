@@ -20,7 +20,7 @@ driven through the `vision-spectra` Typer CLI (`vision_spectra/cli.py`).
 - `vision_spectra/cli.py` — Typer entry point (`vision-spectra`). Commands: `train-cls`,
   `pretrain-mim`, `finetune`, `train-mtl`, `eval`, `download-data`, `info`, plus sub-apps
   `experiments` (loss comparison), `figures` (publication figures), `spectral` (6-scenario
-  capacity×complexity study), `synthetic`.
+  study + `run-study` capacity×complexity sweep), `synthetic`.
 - `vision_spectra/settings.py` — Pydantic config (single source of truth). `_StrictModel`
   base gives every config `extra="forbid"` + `validate_assignment`. Canonical `set_seed`
   and `resolve_device` live here (re-exported by `utils`).
@@ -31,21 +31,28 @@ driven through the `vision-spectra` Typer CLI (`vision_spectra/cli.py`).
   (`get_loss`, `LOSS_REGISTRY`, `MIM_LOSS_REGISTRY`).
 - `vision_spectra/metrics/` — `spectral.py` (the spectral math + `SpectralTracker`),
   `extraction.py` (weight-matrix extraction from timm models), `statistical.py` (t-tests,
-  Cohen's d, CIs), `plotting.py` (CCDF/log-log/heatmap), `gradient_alignment.py` and
-  `tail_truncation.py` (**implemented but not wired into any experiment/CLI — future work**).
+  Cohen's d, CIs), `plotting.py` (CCDF/log-log/heatmap), `gradient_alignment.py` (cosine of
+  the data gradient with the rank-reducing `U Vᵀ` flow) and `tail_truncation.py` (Eckart-Young
+  bulk/head truncation) — **now wired into the spectral runner** (logged as `alignment/*`,
+  `truncation/*`).
 - `vision_spectra/training/` — `base.py` (`BaseTrainer` + the shared `build_optimizer` /
   `build_scheduler` / `warmup_factor` recipe), `classification.py`, `mim.py`, `finetune.py`,
   `multitask.py`.
 - `vision_spectra/data/` — `base.py` (`get_dataset`, `BaseDataset`), `medmnist.py`,
   `synthetic.py`, `transforms.py`.
-- `vision_spectra/experiments/` — `run_spectral_analysis.py` (the headline 6-scenario study;
-  `SCENARIO_CONFIGS`, `create_model_for_scenario`, `run_scenario_experiment`),
-  `run_classification_experiments.py` (loss comparison), `run_synthetic_experiments.py`.
-- `vision_spectra/analysis/publication_figures.py` — reads MLflow → figures/tables/stats.
+- `vision_spectra/experiments/` — `run_spectral_analysis.py` (the headline 6-scenario study +
+  the `run-study` capacity×complexity sweep; `SCENARIO_CONFIGS`, `build_study_configs`,
+  `create_model_for_scenario`, `run_scenario_experiment`, `record_gradient_alignment`,
+  `run_truncation_analysis`), `run_classification_experiments.py` (loss comparison),
+  `run_synthetic_experiments.py`.
+- `vision_spectra/analysis/publication_figures.py` — reads MLflow → A-F figures/tables/stats;
+  `study_figures.py` — reads the `spectral_*` sweep cells → width-sweep / alignment /
+  truncation figures (`figures study`, folded into `figures all`).
 - `vision_spectra/utils/` — `reproducibility.py` (re-exports canonical seed/device +
   `count_parameters`), `checkpointing.py`, `logging.py`, `visualization.py`.
-- `tests/` — `test_data.py`, `test_losses.py`, `test_metrics.py`, `test_training.py`
-  (plain pytest, **87 tests**; get the live count with `poetry run pytest --collect-only -q`).
+- `tests/` — `test_data.py`, `test_losses.py`, `test_metrics.py`, `test_training.py`,
+  `test_spectral_study.py` (plain pytest, **97 tests**; get the live count with
+  `poetry run pytest --collect-only -q`).
 
 ## How to run
 
@@ -145,9 +152,11 @@ No Makefile. Tooling is invoked directly:
 - The 6-scenario `run_spectral_analysis.py` reports best-of-K val accuracy historically but
   now also logs `final/test_accuracy`; it trains a FIXED epoch budget (no early stopping) so
   Δα is measured at a common endpoint across scenarios — that's deliberate.
-- `gradient_alignment.py` and `tail_truncation.py` are exported and tested but invoked by NO
-  experiment/CLI. `tail_truncation` does Eckart-Young low-rank truncation (removes the
-  SMALLEST singular values), not heavy-tail ablation — keep its docstrings honest.
+- `gradient_alignment.py` and `tail_truncation.py` are now wired into `run_scenario_experiment`
+  / `run-study` (logged as `alignment/*` and `truncation/*`); they are still NOT used by the
+  loss/MIM experiment families. `tail_truncation` supports two modes: `bulk` (Eckart-Young,
+  removes the SMALLEST singular values — effective-rank probe) and `head` (removes the LARGEST
+  / heavy-tail outliers — signal-vs-noise probe). `bulk` is not heavy-tail ablation; `head` is.
 - `publication_figures.py` is a single ~1.2k-line module (MLflow extraction + stats +
   plotting + LaTeX + CLI). Splitting it is desirable but deferred; when editing, keep the
   metric-key reads in `extract_scenario_metrics` in sync with what the runners log.

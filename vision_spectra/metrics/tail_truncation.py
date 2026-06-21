@@ -30,6 +30,7 @@ References:
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -71,14 +72,28 @@ def truncate_weight_matrix(
     weight: np.ndarray,
     retention_ratio: float = 0.9,
     min_rank: int = 1,
+    mode: str = "bulk",
 ) -> tuple[np.ndarray, dict[str, float]]:
     """
-    Truncate a weight matrix by zeroing small singular values.
+    Truncate a weight matrix by zeroing singular values.
+
+    Two complementary probes (singular values are returned in descending order):
+
+    - ``mode="bulk"`` (Eckart-Young): retain the ``k`` LARGEST singular values and
+      zero the smallest. Robustness to bulk truncation ⇒ the matrix is effectively
+      low-rank (the smaller SVs are redundant) — the effective-rank / MDL probe.
+    - ``mode="head"``: retain the ``k`` SMALLEST singular values and zero the LARGEST
+      ``len(s)-k`` (the heavy-tail outliers). A large accuracy drop here ⇒ the few
+      dominant singular directions carry the task signal — the heavy-tail-importance
+      / signal-vs-noise probe from the research meeting.
+
+    In BOTH modes ``retention_ratio`` is the fraction of singular values retained.
 
     Args:
         weight: 2D weight matrix
         retention_ratio: Fraction of singular values to retain (0, 1]
         min_rank: Minimum number of singular values to keep
+        mode: "bulk" (keep largest) or "head" (keep smallest / drop the tail)
 
     Returns:
         Tuple of (truncated_weight, info_dict)
@@ -95,7 +110,12 @@ def truncate_weight_matrix(
 
     # Truncate
     s_truncated = s.copy()
-    s_truncated[k:] = 0.0
+    if mode == "head":
+        # Keep the k SMALLEST singular values; zero the largest (len-k) outliers.
+        s_truncated[: len(s) - k] = 0.0
+    else:
+        # Keep the k LARGEST singular values; zero the smallest (standard low-rank).
+        s_truncated[k:] = 0.0
 
     # Reconstruct
     truncated_weight = U @ np.diag(s_truncated) @ Vt
@@ -164,6 +184,7 @@ def truncate_model_layer(
     layer_name: str,
     retention_ratio: float = 0.9,
     use_energy: bool = False,
+    mode: str = "bulk",
 ) -> dict[str, float]:
     """
     Truncate a specific layer in the model (in-place).
@@ -173,6 +194,7 @@ def truncate_model_layer(
         layer_name: Full name of the parameter to truncate
         retention_ratio: Fraction to retain (SVs if use_energy=False, energy if True)
         use_energy: Whether to use energy-based truncation
+        mode: "bulk" (keep largest SVs) or "head" (drop the heavy-tail outliers)
 
     Returns:
         Info dictionary with truncation statistics
@@ -184,7 +206,7 @@ def truncate_model_layer(
             if use_energy:
                 truncated, info = truncate_by_energy(weight, retention_ratio)
             else:
-                truncated, info = truncate_weight_matrix(weight, retention_ratio)
+                truncated, info = truncate_weight_matrix(weight, retention_ratio, mode=mode)
 
             with torch.no_grad():
                 param.copy_(torch.from_numpy(truncated).to(param.device))
@@ -198,25 +220,38 @@ def truncate_all_attention_layers(
     model: nn.Module,
     retention_ratio: float = 0.9,
     use_energy: bool = False,
+    mode: str = "bulk",
+    include_mlp: bool = True,
 ) -> dict[str, dict[str, float]]:
     """
-    Truncate all attention-related weight matrices in the model.
+    Truncate the per-block weight matrices of the model.
+
+    By default this covers the SAME matrices the spectral and gradient-alignment
+    analyses use — ``attn.qkv``, ``attn.proj`` and (when ``include_mlp``) ``mlp.fc1``,
+    ``mlp.fc2`` — so the three curves are cross-readable. Matching is boundary-aware
+    (``(?:^|\\.)attn(?:\\.|$)``), which excludes ``patch_embed.proj`` and the classifier
+    head. Pass ``include_mlp=False`` to restrict to attention only.
 
     Args:
         model: PyTorch model (ViT)
         retention_ratio: Fraction to retain
         use_energy: Whether to use energy-based truncation
+        mode: "bulk" (keep largest SVs) or "head" (drop the heavy-tail outliers)
+        include_mlp: also truncate ``mlp.fc1``/``mlp.fc2`` (parity with extraction)
 
     Returns:
         Dictionary mapping layer names to truncation info
     """
+    patterns = ["attn"] + (["mlp"] if include_mlp else [])
     results = {}
 
     for name, param in model.named_parameters():
-        # Target attention weights (QKV, projection)
-        if param.dim() == 2 and ("attn" in name or "qkv" in name or "proj" in name):
-            info = truncate_model_layer(model, name, retention_ratio, use_energy)
-            results[name] = info
+        if param.dim() != 2:
+            continue
+        if not any(re.search(rf"(?:^|\.){p}(?:\.|$)", name) for p in patterns):
+            continue
+        info = truncate_model_layer(model, name, retention_ratio, use_energy, mode=mode)
+        results[name] = info
 
     return results
 
@@ -226,17 +261,31 @@ def evaluate_model(
     model: nn.Module,
     data_loader: Any,
     device: torch.device,
+    max_batches: int | None = None,
 ) -> float:
-    """Evaluate model accuracy on a data loader."""
+    """Evaluate model accuracy on a data loader.
+
+    Args:
+        model: model to evaluate.
+        data_loader: data loader yielding (images, labels).
+        device: torch device.
+        max_batches: if set, evaluate on at most this many batches (a fixed prefix
+            of the loader) to keep the truncation sweep cheap when it is run for
+            every seed/scenario. The loader must be deterministic (shuffle=False),
+            as it is for test/val splits here.
+    """
     model.eval()
     correct = 0
     total = 0
 
-    for images, labels in data_loader:
+    for batch_idx, (images, labels) in enumerate(data_loader):
+        if max_batches is not None and batch_idx >= max_batches:
+            break
         images = images.to(device)
         labels = labels.to(device)
+        # squeeze(-1) (not squeeze()) so a singleton batch does not collapse to 0-dim.
         if labels.dim() > 1:
-            labels = labels.squeeze()
+            labels = labels.squeeze(-1)
 
         outputs = model(images)
         _, predicted = outputs.max(1)
@@ -251,7 +300,10 @@ def run_truncation_experiment(
     val_loader: Any,
     device: torch.device,
     retention_ratios: list[float] | None = None,
-    use_energy: bool = True,
+    use_energy: bool = False,
+    mode: str = "bulk",
+    max_batches: int | None = None,
+    include_mlp: bool = True,
 ) -> list[dict[str, Any]]:
     """
     Run truncation experiment with multiple retention ratios.
@@ -261,10 +313,15 @@ def run_truncation_experiment(
 
     Args:
         model: Trained PyTorch model
-        val_loader: Validation data loader
+        val_loader: Held-out data loader (test split for an unbiased estimate)
         device: Torch device
         retention_ratios: List of retention ratios to test
-        use_energy: Whether to use energy-based truncation
+        use_energy: Whether to use energy-based truncation (ratio = fraction of SVs
+            when False, fraction of spectral energy when True)
+        mode: "bulk" (keep the largest SVs; effective-rank probe) or "head" (drop the
+            heavy-tail outliers; signal-vs-noise probe)
+        max_batches: cap on eval batches per truncation level (keeps the sweep cheap
+            when run per seed/scenario); the loader must be deterministic.
 
     Returns:
         List of result dictionaries, one per retention ratio
@@ -276,7 +333,7 @@ def run_truncation_experiment(
     original_state = {k: v.clone() for k, v in model.state_dict().items()}
 
     # Evaluate original accuracy
-    original_accuracy = evaluate_model(model, val_loader, device)
+    original_accuracy = evaluate_model(model, val_loader, device, max_batches=max_batches)
 
     results = []
 
@@ -285,13 +342,15 @@ def run_truncation_experiment(
         model.load_state_dict(original_state)
 
         if ratio < 1.0:
-            # Truncate all attention layers
-            truncation_info = truncate_all_attention_layers(model, ratio, use_energy)
+            # Truncate the per-block matrices (attn + mlp by default)
+            truncation_info = truncate_all_attention_layers(
+                model, ratio, use_energy, mode=mode, include_mlp=include_mlp
+            )
         else:
             truncation_info = {}
 
         # Evaluate truncated model
-        truncated_accuracy = evaluate_model(model, val_loader, device)
+        truncated_accuracy = evaluate_model(model, val_loader, device, max_batches=max_batches)
 
         # Compute aggregate statistics
         total_original_rank = sum(
@@ -310,6 +369,7 @@ def run_truncation_experiment(
             {
                 "retention_ratio": ratio,
                 "use_energy": use_energy,
+                "mode": mode,
                 "original_accuracy": original_accuracy,
                 "truncated_accuracy": truncated_accuracy,
                 "accuracy_drop": original_accuracy - truncated_accuracy,

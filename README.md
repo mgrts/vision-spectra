@@ -126,7 +126,12 @@ The research is structured around six scenarios that vary network capacity (`emb
 #### Running the Six Scenarios
 
 ```bash
-# Run all scenarios at once
+# Full capacity × complexity study (width + depth sweeps + Path/Blood/Derma + A–F),
+# with gradient-alignment and tail-truncation on by default — one turnkey command:
+poetry run vision-spectra spectral run-study --tier 3 --num-seeds 10 --device cuda
+# tiers: 1 = width sweep (spine), 2 = + depth sweep + extra datasets, 3 = + A–F grid.
+
+# Or just the original six scenarios:
 poetry run python -m vision_spectra.experiments.run_spectral_analysis run-all \
     --num-seeds 3 \
     --device auto
@@ -374,8 +379,8 @@ For comprehensive analysis, experiments can be run across multiple model variant
 | Synthetic experiments | ✅ Complete | Scenario A fully supported |
 | Narrow network variant | ✅ Complete | `embed_dim`/`depth` params in ViT |
 | Spectral analysis pipeline | ✅ Complete | `run_spectral_analysis.py` |
-| Gradient alignment metric | ⚠️ Implemented, not wired | `vision_spectra/metrics/gradient_alignment.py` — not invoked by any experiment/CLI yet |
-| Tail-truncation experiment | ⚠️ Implemented, not wired | `vision_spectra/metrics/tail_truncation.py` — Eckart-Young low-rank truncation; not invoked by any experiment/CLI yet |
+| Gradient alignment metric | ✅ Wired | `gradient_alignment.py` — logged as `alignment/*` by `run_scenario_experiment` / `spectral run-study` |
+| Tail-truncation experiment | ✅ Wired | `tail_truncation.py` — `bulk` (effective-rank) + `head` (heavy-tail) modes, logged as `truncation/*` by the spectral runner |
 | CCDF/log-log plots | ✅ Complete | `vision_spectra/metrics/plotting.py` |
 | Statistical comparison | ✅ Complete | `vision_spectra/metrics/statistical.py` (descriptive; underpowered at n=3) |
 
