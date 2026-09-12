@@ -52,7 +52,7 @@ driven through the `vision-spectra` Typer CLI (`vision_spectra/cli.py`).
 - `vision_spectra/utils/` — `reproducibility.py` (re-exports canonical seed/device +
   `count_parameters`), `checkpointing.py`, `logging.py`, `visualization.py`.
 - `tests/` — `test_data.py`, `test_losses.py`, `test_metrics.py`, `test_training.py`,
-  `test_spectral_study.py` (plain pytest, **109 tests**; get the live count with
+  `test_spectral_study.py`, `test_version.py` (plain pytest, **111 tests**; get the live count with
   `poetry run pytest --collect-only -q`).
 
 ## How to run
@@ -200,13 +200,18 @@ notebooks. Datasets/model weights/MLflow artifacts must stay out of git — the
 binary/model/dataset extensions (`.pt`/`.pth`/`.npz`/`.npy`/`.pkl`/`.ckpt`/…), secrets, and
 files > 10 MB. **Never `git add -f`** these (the hook blocks it). Pre-commit enforces
 `check-added-large-files` (maxkb=1000) and `detect-private-key`. The package version lives
-under `[tool.poetry]` in `pyproject.toml` (poetry-core backend).
+under `[tool.poetry]` in `pyproject.toml` (poetry-core backend) and is **patch-bumped on every
+`/commit-push`** (`poetry version patch`; `--minor`/`--major`/`--no-bump` override).
+`vision_spectra.__version__` reads the installed metadata (`importlib.metadata`), so never
+hand-edit a version literal; `tests/test_version.py` asserts pyproject ⇄ `__version__` ⇄
+`vision-spectra --version` agree (run `poetry install --only-root` after a bump).
 
 ## Claude Code setup in this repo
 
 - **Skills** (`.claude/skills/`): `/code-review` (read-only review of the working tree
   against the invariants above; delegates to the subagents below) and `/commit-push` (gated
-  review → tests → pre-commit → Conventional-Commits commit → push to `main`).
+  review → tests → pre-commit → **patch version bump on every commit** → Conventional-Commits
+  commit with a `Version: OLD -> NEW` line → push to `main`; `--release` adds a `v<version>` tag).
 - **Subagents** (`.claude/agents/`): `spectral-metric-reviewer`,
   `experiment-reproducibility-auditor`, `training-contract-reviewer`, `loss-correctness-reviewer`.
 - **Hooks** (`.claude/settings.json` → `.claude/hooks/`): auto-format edited `.py` with ruff;

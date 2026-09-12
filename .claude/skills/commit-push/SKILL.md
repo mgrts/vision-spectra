@@ -6,8 +6,8 @@ description: Run code-review, the pytest suite, ruff lint+format, and pre-commit
 # Commit & push for vision-spectra
 
 Analyze pending changes, review them, run the test suite + ruff + pre-commit hooks, update
-docs if needed, write a Conventional Commits message, and push to `main`. Optionally bump the
-package version and push a release tag.
+docs if needed, **bump the package version (patch by default — on EVERY commit)**, write a
+Conventional Commits message, and push to `main`. Optionally push a release tag.
 
 The default branch is **`main`**; origin is **`git@github.com:mgrts/vision-spectra.git`**
 (GitHub, owner `mgrts`). This is a solo research repo, so the default flow pushes directly to
@@ -16,8 +16,15 @@ The default branch is **`main`**; origin is **`git@github.com:mgrts/vision-spect
 ## Arguments
 
 `$ARGUMENTS` — optional. A free-form commit message (used verbatim as the subject after type
-inference) and/or flags: `--no-push` (commit only), `--release` (also bump version and offer
-a tag). There is **no issue tracker** — never invent ticket references.
+inference) and/or flags:
+
+- `--no-push` — commit only.
+- `--minor` / `--major` — bump that component instead of the default **patch** bump.
+- `--no-bump` — skip the version bump (exceptional; e.g. a follow-up commit fixing the
+  previous commit's typo). The default is to bump on every commit.
+- `--release` — after the push, also create and push the tag `v<version>` (Step 10).
+
+There is **no issue tracker** — never invent ticket references.
 
 ## Important
 
@@ -58,7 +65,7 @@ Invoke the `code-review` skill on the pending diff.
 ### Step 3: Run tests
 
 ```bash
-poetry run pytest -q -p no:cacheprovider     # currently 87 tests
+poetry run pytest -q -p no:cacheprovider     # live count: poetry run pytest --collect-only -q
 ```
 
 If tests fail: show failures, try to fix obvious causes from the diff (e.g. an import-path
@@ -94,12 +101,22 @@ Read `README.md` and `CLAUDE.md`; update only sections that drifted from reality
 
 If nothing drifted, skip this step. Do not rewrite docs that are already correct.
 
-### Step 6: Optional version bump + release (only if `--release` or the user asks)
+### Step 6: Version bump (EVERY commit; project rule since 0.1.1)
 
-By default, do NOT bump the version on every commit. If a release is requested:
+Bump `version` under **`[tool.poetry]`** in `pyproject.toml` with Poetry's own command (the
+lock file's content-hash does not depend on the version, so `poetry-lock --check` stays green):
 
-- Patch-bump `version` under **`[tool.poetry]`** in `pyproject.toml` (e.g. `0.1.0 → 0.1.1`).
-- Form the tag `v<version>` — created in Step 10 after the push.
+```bash
+poetry version patch          # default; or `poetry version minor` / `major` with --minor / --major
+poetry install --only-root -q # refresh the installed metadata so vision_spectra.__version__ follows
+poetry run vision-spectra --version   # must print the NEW version
+poetry run pytest -q -p no:cacheprovider tests/test_version.py   # pyproject ⇄ __version__ ⇄ CLI
+```
+
+Record `OLD -> NEW` for the commit body and the summary. Skip this step ONLY with `--no-bump`.
+`vision_spectra.__version__` is read from the installed distribution metadata (never edit a
+literal version string in `vision_spectra/__init__.py`). The tag `v<version>` is created in
+Step 10 only when `--release` was passed.
 
 ### Step 7: Generate the Conventional Commits message
 
@@ -117,8 +134,8 @@ If `$ARGUMENTS` supplied a message, use it verbatim as the subject (after the ty
 
 **Body** (after a blank line): one line per significant change. If spectral-metric semantics,
 MLflow keys, the training contract, scenario configs, or the loss registry changed, explicitly
-note the synchronized test/consumer/doc updates so the contract reads as kept-whole. Add the
-version line only if Step 6 bumped it:
+note the synchronized test/consumer/doc updates so the contract reads as kept-whole. End the
+body with the version line from Step 6 (omit only under `--no-bump`):
 
 ```text
 Version: 0.1.0 -> 0.1.1
@@ -129,8 +146,9 @@ Version: 0.1.0 -> 0.1.1
 ### Step 8: Show summary and confirm
 
 Print: code-review result, test result, ruff/format/pre-commit result, doc updates (or
-"none"), version bump (or "none"), files to be committed (`git status --short`), and the full
-commit message. Then ask with `AskUserQuestion`:
+"none"), version bump `OLD -> NEW` (or "skipped (--no-bump)"), whether a release tag will
+follow, files to be committed (`git status --short` — `pyproject.toml` must be among them
+unless `--no-bump`), and the full commit message. Then ask with `AskUserQuestion`:
 
 ```text
 question: "Commit and push to origin/main?"
@@ -165,10 +183,9 @@ If the push fails (branch protection, auth, network), do NOT retry and do NOT fo
 error and suggest pushing a feature branch + opening a PR
 (`git switch -c <branch> && git push -u origin <branch> && gh pr create`).
 
-### Step 10: Optional release tag
+### Step 10: Optional release tag (only with `--release`)
 
-Only if Step 6 bumped the version. Read `version` from `pyproject.toml`, form `v<version>`.
-Check it does not already exist:
+Read `version` from `pyproject.toml`, form `v<version>`. Check it does not already exist:
 
 ```bash
 git rev-parse "v<version>" 2>/dev/null
@@ -188,9 +205,9 @@ can be pushed manually.
 
 ```text
 Pushed to origin/main.
-Review: passed (or: N findings)   Tests: 87 passed   Ruff/format: passed   Pre-commit: passed
+Review: passed (or: N findings)   Tests: N passed   Ruff/format: passed   Pre-commit: passed
 Doc updates: <files or "none">
-Version: <bump or "no bump">      Tag: <v.. pushed | skipped>
+Version: <OLD -> NEW | skipped (--no-bump)>      Tag: <v.. pushed | none (no --release)>
 ```
 
 Or, if the push was blocked, show the error and the feature-branch + PR suggestion.

@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "vision-spectra"
-version = "0.1.0"
+version = "0.1.1"
 description = "Studying how loss functions affect transformer weight spectra in vision tasks"
 authors = ["Mikhail Gritskikh"]
 readme = "README.md"

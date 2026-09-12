@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import gc
 import json
+import os
 import time
 from dataclasses import dataclass, replace
 from enum import Enum
@@ -1514,10 +1515,10 @@ def _run_study_parallel(
     MLflow's file store copes with concurrent writers as long as the *experiments* exist
     before the lanes start (two processes racing on ``set_experiment`` can create
     duplicates), so they are pre-created here. Each lane trains one small ViT; the GPU is
-    shared, and the per-lane DataLoader workers are scaled down (``config.num_workers`` =
-    max(1, 4 // workers)), so the total stays ≈ 4 up to 4 lanes and grows by one per lane
-    beyond that. A hard child crash (e.g. a CUDA abort) breaks the pool; the remaining jobs
-    are then reported as failed and can be re-run with ``--cells``/``--seeds``.
+    shared, and the per-lane DataLoader workers are ``config.num_workers`` =
+    max(1, min(4, cpu_count // workers)), so lanes share the cores without oversubscribing.
+    A hard child crash (e.g. a CUDA abort) breaks the pool; the remaining jobs are then
+    reported as failed and can be re-run with ``--cells``/``--seeds``.
     """
     import multiprocessing as mp
     from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -1592,6 +1593,12 @@ def run_study(
     workers: int = typer.Option(
         1, "--workers", "-w", help="Parallel (cell, seed) lanes as separate processes"
     ),
+    loader_workers: int | None = typer.Option(
+        None,
+        "--loader-workers",
+        help="DataLoader workers PER LANE (default: min(4, cpu_count // lanes)); cap this "
+        "when sharing the machine with other jobs",
+    ),
     device: DeviceChoice = typer.Option(DeviceChoice.AUTO, "--device"),
     output_dir: Path = typer.Option(None, "--output", "-o"),
     alignment: bool = typer.Option(True, "--alignment/--no-alignment"),
@@ -1629,9 +1636,15 @@ def run_study(
     if save_checkpoints is None:
         save_checkpoints = study_set != "tiers"
     workers = max(1, workers)
+    # Per-lane DataLoader workers: share the machine's cores across lanes, capped at the
+    # single-run default (4), never below 1. On a 32-core box with 4 lanes → 4 per lane.
     lane_loader_workers = (
-        max(1, _num_workers_for(resolved_device) // workers) if workers > 1 else None
+        max(1, min(_num_workers_for(resolved_device), (os.cpu_count() or 4) // workers))
+        if workers > 1
+        else None
     )
+    if loader_workers is not None:
+        lane_loader_workers = max(0, loader_workers)
 
     label = f"Tier {tier}" if study_set == "tiers" else f"set {study_set}"
     console.print(f"\n[bold magenta]═══ Capacity × Complexity Study — {label} ═══[/bold magenta]")
@@ -1653,6 +1666,11 @@ def run_study(
         config.study_set = study_set if study_set != "tiers" else f"tier{tier}"
         if lane_loader_workers is not None:
             config.num_workers = lane_loader_workers if resolved_device.type == "cuda" else 0
+    total_procs = workers * (1 + (lane_loader_workers or _num_workers_for(resolved_device)))
+    console.print(
+        f"  Loader workers/lane: {lane_loader_workers if lane_loader_workers is not None else 'auto'}"
+        f"  ·  ≈{total_procs} processes on {os.cpu_count()} cores\n"
+    )
 
     if workers > 1:
         _run_study_parallel(configs, seeds, resolved_device, resolved_output, workers)

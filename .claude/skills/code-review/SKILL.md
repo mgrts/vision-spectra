@@ -147,7 +147,7 @@ Applies to `models/mim.py`, `models/multitask.py`, `training/finetune.py`.
 Run and report exit status:
 
 ```bash
-poetry run pytest -q -p no:cacheprovider     # currently 87 tests
+poetry run pytest -q -p no:cacheprovider     # live count: poetry run pytest --collect-only -q
 poetry run ruff check vision_spectra tests
 poetry run ruff format --check vision_spectra tests    # enforced in CI
 ```
