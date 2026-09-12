@@ -85,6 +85,7 @@ class BaseDataset(ABC):
             num_workers=self.config.num_workers,
             pin_memory=self._pin_memory,
             drop_last=True,
+            persistent_workers=self.config.num_workers > 0,
         )
 
     def get_val_loader(self) -> DataLoader:
@@ -96,6 +97,7 @@ class BaseDataset(ABC):
             num_workers=self.config.num_workers,
             pin_memory=self._pin_memory,
             drop_last=False,
+            persistent_workers=self.config.num_workers > 0,
         )
 
     def get_test_loader(self) -> DataLoader:
@@ -107,6 +109,7 @@ class BaseDataset(ABC):
             num_workers=self.config.num_workers,
             pin_memory=self._pin_memory,
             drop_last=False,
+            persistent_workers=self.config.num_workers > 0,
         )
 
 

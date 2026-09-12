@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 import timm
 import torch
+from pydantic import ValidationError
 
 from vision_spectra.experiments.run_spectral_analysis import (
     ScenarioConfig,
@@ -174,7 +175,262 @@ class TestAlignmentAndTruncationOnModel:
             summary = run_truncation_analysis(
                 model, self._loader(), torch.device("cpu"), max_batches=2
             )
-        assert set(summary) == {"bulk", "head"}
+        assert set(summary) == {"bulk", "head", "head_drop"}
         for mode in ("bulk", "head"):
             assert "results" in summary[mode] and "analysis" in summary[mode]
             assert all(r["mode"] == mode for r in summary[mode]["results"])
+
+
+class TestSubspaceAlignmentProbe:
+    """The subspace-resolved probe has full [-1, 1] range and correct signs/baselines."""
+
+    def _basis(self, m: int = 64, n: int = 48):
+        rng = np.random.default_rng(0)
+        w = rng.normal(size=(m, n))
+        u, _, vt = np.linalg.svd(w, full_matrices=False)
+        return w, u, vt
+
+    def test_tail_uniform_gradient_gives_cos_tail_one(self) -> None:
+        from vision_spectra.metrics.gradient_alignment import head_k_for_rank, subspace_alignment
+
+        w, u, vt = self._basis()
+        k = head_k_for_rank(min(w.shape))
+        g = u[:, k:] @ vt[k:]  # +U_t V_tᵀ: the step −ηG shrinks every tail σ
+        out = subspace_alignment(g, w)
+        assert out["cos_tail"] == pytest.approx(1.0, abs=1e-9)
+        assert out["cos_head"] == pytest.approx(0.0, abs=1e-9)
+        assert out["frac_tail_shrinking"] == pytest.approx(1.0)
+        assert out["k"] == k and out["rank"] == min(w.shape)
+
+    def test_head_growing_gradient_is_head_enriched(self) -> None:
+        from vision_spectra.metrics.gradient_alignment import head_k_for_rank, subspace_alignment
+
+        w, u, vt = self._basis()
+        k = head_k_for_rank(min(w.shape))
+        g = -(u[:, :k] @ vt[:k])  # −U_k V_kᵀ: the step GROWS the top-k σ
+        out = subspace_alignment(g, w)
+        assert out["cos_head"] == pytest.approx(1.0, abs=1e-9)
+        assert out["cos_tail"] == pytest.approx(0.0, abs=1e-9)
+        assert out["head_energy"] == pytest.approx(1.0, abs=1e-9)
+        # baseline k²/(mn) ⇒ enrichment = mn/k²
+        assert out["head_energy_enrichment"] == pytest.approx(w.size / k**2, rel=1e-6)
+
+    def test_isotropic_gradient_has_unit_enrichment(self) -> None:
+        from vision_spectra.metrics.gradient_alignment import subspace_alignment
+
+        rng = np.random.default_rng(1)
+        w = rng.normal(size=(256, 256))
+        g = rng.normal(size=(256, 256))
+        out = subspace_alignment(g, w)
+        assert 0.7 < out["head_energy_enrichment"] < 1.3
+        assert 0.9 < out["tail_energy_enrichment"] < 1.1
+        assert abs(out["cos_tail"]) < 0.1 and abs(out["cos_head"]) < 0.1
+
+    def test_legacy_cosine_unchanged_and_qkv_split(self) -> None:
+        from vision_spectra.metrics.gradient_alignment import (
+            analyze_model_gradient_alignment,
+            compute_gradient_alignment,
+        )
+
+        rng = np.random.default_rng(2)
+        w = rng.normal(size=(40, 24))
+        g = rng.normal(size=(40, 24))
+        u, _, vt = np.linalg.svd(w, full_matrices=False)
+        uv = u @ vt
+        legacy = float(np.sum(g * uv) / (np.linalg.norm(g) * np.linalg.norm(uv)))
+        assert compute_gradient_alignment(g, w).cosine_similarity == pytest.approx(legacy)
+
+        # fused qkv is split into q/k/v entries named like the spectral extraction
+        model = timm.create_model(
+            "vit_tiny_patch16_224",
+            pretrained=False,
+            num_classes=3,
+            img_size=28,
+            patch_size=4,
+            embed_dim=32,
+            depth=1,
+            num_heads=1,
+        )
+        out = model(torch.randn(4, 3, 28, 28))
+        out.sum().backward()
+        results = analyze_model_gradient_alignment(model, layer_patterns=["attn", "mlp"])
+        names = {r.layer_name for r in results}
+        assert {"blocks.0.attn.qkv.q", "blocks.0.attn.qkv.k", "blocks.0.attn.qkv.v"} <= names
+        assert {r.matrix_type for r in results} == {"q", "k", "v", "proj", "fc1", "fc2"}
+        agg = __import__(
+            "vision_spectra.metrics.gradient_alignment", fromlist=["aggregate_gradient_alignment"]
+        ).aggregate_gradient_alignment(results)
+        assert {"cos_tail_mean", "cos_head_mean", "fc1_cos_tail", "q_cos_head"} <= set(agg)
+        assert all(np.isfinite(agg[k]) for k in ("cos_tail_mean", "cos_head_mean"))
+
+
+class TestHeadDropProbe:
+    """Absolute-count head drop removes exactly the top-n singular values."""
+
+    def test_drop_top_n(self) -> None:
+        from vision_spectra.metrics.tail_truncation import drop_top_singular_values
+
+        rng = np.random.RandomState(0)
+        u, _ = np.linalg.qr(rng.randn(10, 5))
+        v, _ = np.linalg.qr(rng.randn(5, 5))
+        w = (u * np.array([10.0, 3.0, 1.0, 0.3, 0.1])) @ v.T
+        new_w, info = drop_top_singular_values(w, 2)
+        kept = np.sort(np.linalg.svd(new_w, compute_uv=False))[::-1][:3]
+        assert np.allclose(kept, [1.0, 0.3, 0.1], atol=1e-8)
+        assert info["n_dropped"] == 2 and info["top_sv_after"] == pytest.approx(1.0)
+        # never drops everything
+        _, info = drop_top_singular_values(w, 99)
+        assert info["n_dropped"] == 4
+
+    def test_groups_split_qkv_and_runner_logs_headn(self, tmp_path) -> None:
+        import mlflow
+
+        from vision_spectra.metrics.tail_truncation import iter_target_matrices
+
+        model = timm.create_model(
+            "vit_tiny_patch16_224",
+            pretrained=False,
+            num_classes=3,
+            img_size=28,
+            patch_size=4,
+            embed_dim=32,
+            depth=2,
+            num_heads=1,
+        )
+        types = [t for *_, t in iter_target_matrices(model, "all")]
+        assert sorted(set(types)) == ["fc1", "fc2", "k", "proj", "q", "v"]
+        assert len(types) == 12  # 6 matrices × 2 blocks (qkv split)
+        assert [t for *_, t in iter_target_matrices(model, "mlp")] == ["fc1", "fc2"] * 2
+
+        x = torch.randn(16, 3, 28, 28)
+        y = torch.randint(0, 3, (16,))
+        loader = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(x, y), batch_size=8)
+        mlflow.set_tracking_uri((tmp_path / "mlruns").as_uri())
+        with mlflow.start_run() as run:
+            summary = run_truncation_analysis(
+                model, loader, torch.device("cpu"), max_batches=2, head_drop_counts=(1, 3)
+            )
+        assert set(summary) == {"bulk", "head", "head_drop"}
+        groups = {(r["group"], r["n_drop"]) for r in summary["head_drop"]["results"]}
+        assert {("all", 1), ("all", 3), ("qkv", 1), ("mlp", 3)} <= groups
+        client = mlflow.MlflowClient()
+        steps = {
+            m.step for m in client.get_metric_history(run.info.run_id, "truncation/headn_acc")
+        }
+        assert steps == {1, 3}
+        assert client.get_metric_history(run.info.run_id, "truncation/headn_mlp_acc")
+
+
+class TestFollowupStudy:
+    """The follow-up cells are step-matched and carry the intended knobs."""
+
+    def test_step_matching(self) -> None:
+        from vision_spectra.experiments.run_spectral_analysis import (
+            build_followup_configs,
+            expected_total_steps,
+        )
+
+        cells = {c.name: c for c in build_followup_configs(wide=True)}
+        long_syn = expected_total_steps(cells["w192_synlong"])
+        path = expected_total_steps(cells["w192_path"])
+        assert abs(long_syn - path) / path < 0.01  # ≈70k steps both
+        short_path = expected_total_steps(cells["w192_pathshort"])
+        syn = expected_total_steps(cells["w192_syn"])
+        assert abs(short_path - syn) / syn < 0.05  # ≈0.9k steps both
+        assert cells["w192_pathshort"].train_subsample == 1000
+        assert cells["w192_synlong"].num_eval_samples == 2000
+        assert (
+            cells["w192_path_wd0"].weight_decay == 0.0
+            and cells["w384_path_wd0"].weight_decay == 0.0
+        )
+        assert all(c.save_checkpoint and not c.log_histograms for c in cells.values())
+        assert {"w768_path", "w024_path"} <= set(cells)
+        for cfg in cells.values():
+            num_heads = max(1, cfg.embed_dim // 32)
+            assert cfg.embed_dim % num_heads == 0
+        assert len({c.name for c in build_followup_configs(wide=True)}) == len(cells)  # unique
+
+    def test_expected_steps_match_real_loaders(self) -> None:
+        import torch
+
+        from vision_spectra.data.synthetic import create_synthetic_dataset
+        from vision_spectra.experiments.run_spectral_analysis import (
+            _PATH,
+            _SIMPLE,
+            _cell,
+            expected_total_steps,
+        )
+
+        syn = _cell("w192", 192, 6, _SIMPLE)  # 1000 samples, bs 32, 30 epochs, no drop_last
+        train_loader, _, _ = create_synthetic_dataset(
+            num_classes=3,
+            num_samples_train=1000,
+            num_samples_val=8,
+            num_samples_test=8,
+            batch_size=32,
+        )
+        assert len(train_loader) * syn.epochs == expected_total_steps(syn) == 960
+        # MedMNIST train loaders use drop_last=True → floor(n / bs)
+        short = _cell("w192", 192, 6, _PATH)
+        short.train_subsample, short.epochs, short.batch_size = 1000, 30, 32
+        dl = torch.utils.data.DataLoader(
+            torch.utils.data.TensorDataset(torch.zeros(1000, 1)), batch_size=32, drop_last=True
+        )
+        assert len(dl) * 30 == expected_total_steps(short) == 930
+
+    def test_study_set_dispatch(self) -> None:
+        from vision_spectra.experiments.run_spectral_analysis import build_study_set
+
+        assert len(build_study_set("tiers", 1)) == 8
+        assert len(build_study_set("followup")) == 12
+        assert len(build_study_set("followup-wide")) == 14
+        with pytest.raises(ValueError):
+            build_study_set("nope")
+
+    def test_latest_run_per_seed_dedup(self) -> None:
+        import pandas as pd
+
+        from vision_spectra.analysis.publication_figures import select_latest_run_per_seed
+
+        runs = pd.DataFrame(
+            {
+                "run_id": ["a", "b", "c", "d", "e", "f"],
+                "params.seed": ["42", "142", "42", "242", None, None],
+                "start_time": pd.to_datetime([1, 2, 3, 4, 5, 6], unit="s"),
+            }
+        )
+        kept = select_latest_run_per_seed(runs)
+        # "a" superseded by "c"; seedless rows "e"/"f" are kept as-is (not merged).
+        assert sorted(kept["run_id"]) == ["b", "c", "d", "e", "f"]
+        # no seed column at all → untouched
+        assert len(select_latest_run_per_seed(runs.drop(columns=["params.seed"]))) == 6
+
+
+class TestSyntheticCacheAndSubsample:
+    def test_cached_dataset_matches_on_the_fly(self) -> None:
+        from vision_spectra.data.synthetic import SyntheticImageDataset
+        from vision_spectra.data.transforms import get_eval_transforms
+
+        t = get_eval_transforms(28, 3)
+        a = SyntheticImageDataset(40, 3, seed=5, transform=t, cache=True)
+        b = SyntheticImageDataset(40, 3, seed=5, transform=t, cache=False)
+        assert a._cache is not None and a._cache.shape == (40, 28, 28, 3)
+        for i in (0, 7, 39):
+            xa, ya = a[i]
+            xb, yb = b[i]
+            assert ya == yb and torch.equal(xa, xb)
+
+    def test_train_only_subsample_allocation(self) -> None:
+        from vision_spectra.data.medmnist import MedMNISTDataset
+        from vision_spectra.settings import DatasetConfig
+
+        np.random.seed(0)
+        labels = np.repeat(np.arange(9), [2000, 1500, 1000, 1000, 1000, 1000, 500, 500, 496])
+        idx = MedMNISTDataset._get_stratified_count_indices(labels, 1000)
+        assert len(idx) == 1000 and len(set(idx)) == 1000
+        counts = np.bincount(labels[idx], minlength=9)
+        assert counts.min() >= 1 and abs(counts[0] - 222) <= 1  # ≈ proportional
+        cfg = DatasetConfig(train_subsample=1000)
+        assert cfg.train_subsample == 1000
+        with pytest.raises(ValidationError):
+            DatasetConfig(train_subsample=0)

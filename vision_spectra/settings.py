@@ -126,6 +126,14 @@ class DatasetConfig(_StrictModel):
         le=1.0,
         description="Fraction of dataset to use (0-1]. Use <1 for faster experiments.",
     )
+    train_subsample: int | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Keep only this many TRAIN images (stratified by class); val/test stay full. "
+            "Used by the step-matched controls (e.g. PathMNIST-1k). Applied after sample_ratio."
+        ),
+    )
 
     # Synthetic dataset specific
     num_classes: int = Field(default=5, gt=1, description="Number of classes (synthetic)")

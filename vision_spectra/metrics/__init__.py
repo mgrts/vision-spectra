@@ -15,6 +15,7 @@ from vision_spectra.metrics.gradient_alignment import (
     analyze_model_gradient_alignment,
     compute_gradient_alignment,
     compute_rank_reducing_gradient,
+    subspace_alignment,
 )
 from vision_spectra.metrics.plotting import (
     generate_spectral_report,
@@ -49,6 +50,8 @@ from vision_spectra.metrics.statistical import (
 from vision_spectra.metrics.tail_truncation import (
     TruncationResult,
     analyze_truncation_results,
+    drop_top_singular_values,
+    run_head_drop_experiment,
     run_truncation_experiment,
     save_truncation_report,
     truncate_all_attention_layers,
@@ -84,6 +87,7 @@ __all__ = [
     "compute_gradient_alignment",
     "analyze_model_gradient_alignment",
     "aggregate_gradient_alignment",
+    "subspace_alignment",
     # Plotting
     "plot_ccdf",
     "plot_loglog_rank",
@@ -107,6 +111,8 @@ __all__ = [
     "truncate_model_layer",
     "truncate_all_attention_layers",
     "run_truncation_experiment",
+    "run_head_drop_experiment",
+    "drop_top_singular_values",
     "analyze_truncation_results",
     "save_truncation_report",
 ]

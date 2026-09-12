@@ -495,3 +495,152 @@ def save_truncation_report(
 
     with open(output_path, "w") as f:
         json.dump(report, f, indent=2)
+
+
+# =============================================================================
+# Head-drop probe (absolute counts) — "do the top singular directions carry the signal?"
+# =============================================================================
+#
+# The retention-ratio ``head`` sweep above removes the top (1-r)·n singular values per
+# matrix; its first grid point (retention 0.9 ⇒ drop 10 % of the SVs, i.e. 38 directions
+# at width 384) already collapsed every model in the June-2026 study to chance. The
+# informative regime is the first FEW singular values, so this probe drops an ABSOLUTE
+# number ``n_drop`` of the largest singular values per matrix, optionally restricted to a
+# matrix group, and (unlike the ratio sweeps) splits the fused timm ``attn.qkv`` weight
+# into Q/K/V blocks so "q"/"k"/"v" groups mean the same matrices as the spectral metrics.
+
+HEAD_DROP_GROUPS: dict[str, tuple[str, ...]] = {
+    "all": ("q", "k", "v", "proj", "fc1", "fc2"),
+    "qkv": ("q", "k", "v"),
+    "attn": ("q", "k", "v", "proj"),
+    "proj": ("proj",),
+    "mlp": ("fc1", "fc2"),
+    "fc1": ("fc1",),
+    "fc2": ("fc2",),
+}
+
+
+def drop_top_singular_values(
+    weight: np.ndarray, n_drop: int, min_keep: int = 1
+) -> tuple[np.ndarray, dict[str, float]]:
+    """Zero the ``n_drop`` LARGEST singular values of ``weight`` (keep at least ``min_keep``).
+
+    Returns (new_weight, info) with ``info = {original_rank, n_dropped, energy_retained,
+    top_sv_before, top_sv_after}``.
+    """
+    U, s, Vt = svd(weight.astype(np.float64), full_matrices=False)
+    total_energy = float(np.sum(s**2))
+    n_drop = int(max(0, min(n_drop, len(s) - min_keep)))
+    s_new = s.copy()
+    s_new[:n_drop] = 0.0
+    new_w = (U * s_new) @ Vt
+    info = {
+        "original_rank": int(np.sum(s > 1e-10)),
+        "n_dropped": n_drop,
+        "energy_retained": float(np.sum(s_new**2) / total_energy) if total_energy > 0 else 1.0,
+        "top_sv_before": float(s[0]) if len(s) else 0.0,
+        "top_sv_after": float(s_new[n_drop]) if n_drop < len(s_new) else 0.0,
+    }
+    return new_w.astype(weight.dtype), info
+
+
+def _matrix_type_of_param(name: str) -> str | None:
+    """Type of a per-block 2-D parameter by name (None for patch_embed / head / other)."""
+    base = name[: -len(".weight")] if name.endswith(".weight") else name
+    if re.search(r"(?:^|\.)attn\.qkv$", base):
+        return "qkv"  # fused; split by the caller
+    if re.search(r"(?:^|\.)attn\.proj$", base):
+        return "proj"
+    if re.search(r"(?:^|\.)mlp\.fc1$", base):
+        return "fc1"
+    if re.search(r"(?:^|\.)mlp\.fc2$", base):
+        return "fc2"
+    return None
+
+
+def iter_target_matrices(model: nn.Module, group: str = "all"):
+    """Yield ``(name, param, row_slice, matrix_type)`` for every matrix in ``group``.
+
+    The fused ``attn.qkv`` (3d × d) yields three entries (rows [0:d], [d:2d], [2d:3d])
+    typed q/k/v, so groups address the same objects as ``metrics/extraction.py``.
+    """
+    wanted = HEAD_DROP_GROUPS[group]
+    for name, param in model.named_parameters():
+        if param.dim() != 2:
+            continue
+        mtype = _matrix_type_of_param(name)
+        if mtype is None:
+            continue
+        if mtype == "qkv":
+            if param.shape[0] != 3 * param.shape[1]:
+                continue
+            d = param.shape[1]
+            for i, sub in enumerate(("q", "k", "v")):
+                if sub in wanted:
+                    yield name, param, slice(i * d, (i + 1) * d), sub
+        elif mtype in wanted:
+            yield name, param, slice(None), mtype
+
+
+def drop_head_all_layers(
+    model: nn.Module, n_drop: int, group: str = "all"
+) -> dict[str, dict[str, float]]:
+    """Drop the top ``n_drop`` singular values from every matrix in ``group`` (in place)."""
+    infos: dict[str, dict[str, float]] = {}
+    for name, param, rows, mtype in iter_target_matrices(model, group):
+        weight = param.detach()[rows].cpu().numpy()
+        new_w, info = drop_top_singular_values(weight, n_drop)
+        with torch.no_grad():
+            param[rows] = torch.from_numpy(new_w).to(param.device, param.dtype)
+        key = name if rows == slice(None) else f"{name}[{mtype}]"
+        infos[key] = info
+    return infos
+
+
+def run_head_drop_experiment(
+    model: nn.Module,
+    data_loader: Any,
+    device: torch.device,
+    n_drops: tuple[int, ...] = (1, 2, 3, 5, 10),
+    groups: dict[str, tuple[int, ...]] | None = None,
+    max_batches: int | None = None,
+) -> list[dict[str, Any]]:
+    """Accuracy after dropping the top-``n`` singular values per matrix, for several ``n``
+    and matrix groups. Weights are restored after every setting.
+
+    Args:
+        n_drops: counts evaluated for the ``"all"`` group.
+        groups: extra ``{group: counts}`` to evaluate (default: q/k/v, proj and MLP at
+            n ∈ {1, 3}); keys must be in :data:`HEAD_DROP_GROUPS`.
+        max_batches: cap on eval batches per setting (deterministic loader required).
+
+    Returns one dict per (group, n_drop) with ``original_accuracy``, ``truncated_accuracy``,
+    ``accuracy_drop``, ``avg_energy_retained`` and ``num_matrices``.
+    """
+    if groups is None:
+        groups = {"qkv": (1, 3), "proj": (1, 3), "mlp": (1, 3)}
+    plan: list[tuple[str, int]] = [("all", n) for n in n_drops]
+    plan += [(g, n) for g, ns in groups.items() for n in ns]
+
+    original_state = {k: v.clone() for k, v in model.state_dict().items()}
+    original_accuracy = evaluate_model(model, data_loader, device, max_batches=max_batches)
+    results: list[dict[str, Any]] = []
+    for group, n in plan:
+        model.load_state_dict(original_state)
+        infos = drop_head_all_layers(model, n, group)
+        acc = evaluate_model(model, data_loader, device, max_batches=max_batches)
+        results.append(
+            {
+                "group": group,
+                "n_drop": int(n),
+                "original_accuracy": original_accuracy,
+                "truncated_accuracy": acc,
+                "accuracy_drop": original_accuracy - acc,
+                "avg_energy_retained": float(
+                    np.mean([i["energy_retained"] for i in infos.values()]) if infos else 1.0
+                ),
+                "num_matrices": len(infos),
+            }
+        )
+    model.load_state_dict(original_state)
+    return results

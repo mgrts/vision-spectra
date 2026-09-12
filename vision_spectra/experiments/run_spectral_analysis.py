@@ -29,7 +29,7 @@ from __future__ import annotations
 import gc
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -53,6 +53,7 @@ from vision_spectra.metrics.extraction import (
     extract_qkv_weights,
 )
 from vision_spectra.metrics.gradient_alignment import (
+    DEFAULT_HEAD_FRACTION,
     aggregate_gradient_alignment,
     analyze_model_gradient_alignment,
 )
@@ -62,6 +63,7 @@ from vision_spectra.metrics.spectral import (
 )
 from vision_spectra.metrics.tail_truncation import (
     analyze_truncation_results,
+    run_head_drop_experiment,
     run_truncation_experiment,
 )
 from vision_spectra.settings import (
@@ -142,6 +144,16 @@ class ScenarioConfig:
     # Optional analyses (meeting priorities); on by default so one study run yields them.
     run_alignment: bool = True  # cosine(∇L, U Vᵀ) gradient-alignment to the rank flow
     run_truncation: bool = True  # post-train Eckart-Young bulk/head truncation sweep
+    # --- follow-up study knobs (Sept 2026; see EXPERIMENT_PLAN_V2 §9) ---
+    weight_decay: float = 0.05  # AdamW decoupled weight decay (0.0 → wd-ablation cells)
+    num_eval_samples: int = 200  # synthetic val/test size (2000 for the long control)
+    train_subsample: int | None = None  # MedMNIST: keep N TRAIN images; val/test full
+    save_checkpoint: bool = False  # log final weights as MLflow artifact model/final.pt
+    log_histograms: bool = False  # per-matrix histogram PNGs (regenerable from SV JSON)
+    alignment_head_fraction: float = DEFAULT_HEAD_FRACTION  # head = top 10 % of SVs
+    head_drop_counts: tuple[int, ...] = (1, 2, 3, 5, 10)  # head-drop probe (absolute n)
+    num_workers: int | None = None  # DataLoader workers; None → auto (4 on CUDA else 0)
+    study_set: str = ""  # provenance: which run-study set produced the run ("" = legacy)
 
     @property
     def scenario_label(self) -> str:
@@ -344,6 +356,98 @@ def build_study_configs(tier: int = 1) -> list[ScenarioConfig]:
 
 
 # =============================================================================
+# Follow-up study (Sept 2026) — the controls the June-2026 tier-3 results need
+# =============================================================================
+
+# MedMNIST v2 official train-split sizes (used only to document step matching).
+MEDMNIST_TRAIN_SIZE = {"pathmnist": 89_996, "bloodmnist": 11_959, "dermamnist": 7_007}
+
+STUDY_SETS = ("tiers", "followup", "followup-wide")
+
+
+def _variant(base: ScenarioConfig, tag: str, description: str, **overrides: Any) -> ScenarioConfig:
+    """Copy a sweep cell under a new experiment tag with field overrides."""
+    return replace(base, scenario=tag, description=description, **overrides)
+
+
+def build_followup_configs(wide: bool = False) -> list[ScenarioConfig]:
+    """Cells for the follow-up run (see RESULTS_TIER3_JUNE2026.md §4):
+
+    1. ``w192_synlong``  — synthetic, 90k images × 50 epochs @ bs 64 ⇒ ≈70k optimizer steps,
+       i.e. STEP-MATCHED to ``w192_path`` (the "is complexity just training length?" control).
+    2. ``w192_pathshort`` — PathMNIST with a 1k-image stratified TRAIN subsample × 30 epochs
+       @ bs 32 ⇒ ≈0.9k steps, step-matched to ``w192_syn`` (val/test stay full).
+    3. ``w192_path_wd0`` / ``w384_path_wd0`` — weight-decay ablation (mechanism control).
+    4. The tier-1 width sweep (8 cells) re-run with the new probes; the figure readers keep
+       the latest run per seed, so re-running does not double-count.
+    5. ``wide=True`` adds ``w768_path`` and ``w024_path`` (corridor edges).
+
+    Every cell saves its final checkpoint and logs no histogram PNGs.
+    """
+    w192_syn = _cell("w192", 192, 6, _SIMPLE)
+    w192_path = _cell("w192", 192, 6, _PATH)
+    w384_path = _cell("w384", 384, 6, _PATH)
+
+    cells: list[ScenarioConfig] = [
+        _variant(
+            w192_syn,
+            "w192_synlong",
+            "w192 on synthetic, 90k images × 50 ep (≈70k steps: step-matched to w192_path)",
+            num_samples=90_000,
+            epochs=50,
+            batch_size=64,
+            log_epochs=list(_LOG_EPOCHS_COMPLEX),
+            num_eval_samples=2000,
+        ),
+        _variant(
+            w192_path,
+            "w192_pathshort",
+            "w192 on PathMNIST-1k (train subsample) × 30 ep (≈0.9k steps: matched to w192_syn)",
+            train_subsample=1000,
+            epochs=30,
+            batch_size=32,
+            log_epochs=list(_LOG_EPOCHS_SIMPLE),
+        ),
+        _variant(
+            w192_path, "w192_path_wd0", "w192 on PathMNIST, weight decay 0", weight_decay=0.0
+        ),
+        _variant(
+            w384_path, "w384_path_wd0", "w384 on PathMNIST, weight decay 0", weight_decay=0.0
+        ),
+    ]
+    cells.extend(build_study_configs(1))
+    if wide:
+        cells.append(_cell("w768", 768, 6, _PATH))
+        cells.append(_cell("w024", 24, 6, _PATH))
+    for c in cells:
+        c.save_checkpoint = True
+        c.log_histograms = False
+    return cells
+
+
+def build_study_set(study_set: str, tier: int = 1) -> list[ScenarioConfig]:
+    """Dispatch ``run-study --set``: ``tiers`` (cumulative, via ``--tier``) or a follow-up set."""
+    if study_set == "tiers":
+        return build_study_configs(tier)
+    if study_set == "followup":
+        return build_followup_configs(wide=False)
+    if study_set == "followup-wide":
+        return build_followup_configs(wide=True)
+    raise ValueError(f"unknown study set {study_set!r}; choose from {STUDY_SETS}")
+
+
+def expected_total_steps(config: ScenarioConfig) -> int:
+    """Optimizer steps the training loop will take (documentation / tests for step matching)."""
+    if config.dataset_name == "synthetic":
+        n = config.num_samples or 1000
+        steps = -(-n // config.batch_size)  # DataLoader without drop_last → ceil
+    else:
+        n = config.train_subsample or MEDMNIST_TRAIN_SIZE[config.dataset_name]
+        steps = n // config.batch_size  # BaseDataset train loader uses drop_last=True
+    return steps * config.epochs
+
+
+# =============================================================================
 # Model Creation with Expressivity Control
 # =============================================================================
 
@@ -454,6 +558,7 @@ def log_spectral_artifacts(
     analysis: dict[str, Any],
     epoch: int,
     run_id: str | None = None,
+    histograms: bool = False,
 ) -> None:
     """
     Log spectral analysis artifacts to MLflow.
@@ -487,6 +592,11 @@ def log_spectral_artifacts(
                 }
             json.dump(clean_metrics, f, indent=2)
         mlflow.log_artifact(str(metrics_file), f"spectral/epoch_{epoch}")
+
+        # Histogram PNGs are opt-in: ~430 files/run, CPU-bound, and fully regenerable
+        # from singular_values.json. Off by default since the follow-up study.
+        if not histograms:
+            return
 
         # Generate and save histogram plots
         histograms_dir = epoch_dir / "histograms"
@@ -538,8 +648,14 @@ def record_gradient_alignment(
     probe_batch: tuple[torch.Tensor, torch.Tensor],
     criterion: torch.nn.Module,
     device: torch.device,
+    head_fraction: float = DEFAULT_HEAD_FRACTION,
 ) -> dict[str, float]:
-    """Cosine alignment between the data gradient and the rank-reducing direction.
+    """Alignment between the data gradient and the rank-reducing directions.
+
+    Logs the legacy full-basis cosine (``cos_sim_mean`` etc.) AND the subspace-resolved
+    probe (``cos_head_mean``, ``cos_tail_mean``, ``*_energy_enrichment_mean``, per-type
+    ``{q,k,v,proj,fc1,fc2}_cos_*``); see ``metrics/gradient_alignment.py``.
+
 
     For each attention/MLP weight W the rank-reducing (nuclear-norm) direction is U Vᵀ.
     The SGD update is −η∇L and the rank-reducing step is −U Vᵀ, so the update locally
@@ -561,7 +677,9 @@ def record_gradient_alignment(
         outputs = model(images)
         loss = criterion(outputs, labels)
         loss.backward()
-        results = analyze_model_gradient_alignment(model, layer_patterns=["attn", "mlp"])
+        results = analyze_model_gradient_alignment(
+            model, layer_patterns=["attn", "mlp"], head_fraction=head_fraction
+        )
         aggregated = aggregate_gradient_alignment(results)
     except Exception as align_err:
         # An optional diagnostic must never sink an otherwise-finished training run;
@@ -580,8 +698,13 @@ def run_truncation_analysis(
     test_loader: Any,
     device: torch.device,
     max_batches: int = 32,
+    head_drop_counts: tuple[int, ...] = (1, 2, 3, 5, 10),
 ) -> dict[str, Any]:
     """Post-training Eckart-Young truncation sweep in both directions, logged to MLflow.
+
+    Also runs the HEAD-DROP probe (drop the top-``n`` singular values per matrix, absolute
+    counts, split Q/K/V) and logs ``truncation/headn_acc`` (step = n) for all matrices
+    plus ``truncation/headn_{qkv,proj,mlp}_acc`` for the per-group ablations.
 
     - ``bulk``: keep the largest SVs (effective-rank / MDL probe).
     - ``head``: drop the largest SVs / heavy-tail outliers (signal-vs-noise probe).
@@ -614,6 +737,18 @@ def run_truncation_analysis(
                 f"truncation/{mode}_critical_threshold", float(analysis["critical_threshold"])
             )
         summary[mode] = {"results": results, "analysis": analysis}
+
+    if head_drop_counts:
+        head_results = run_head_drop_experiment(
+            model, test_loader, device, n_drops=tuple(head_drop_counts), max_batches=max_batches
+        )
+        for r in head_results:
+            prefix = (
+                "truncation/headn" if r["group"] == "all" else f"truncation/headn_{r['group']}"
+            )
+            mlflow.log_metric(f"{prefix}_acc", r["truncated_accuracy"], step=r["n_drop"])
+            mlflow.log_metric(f"{prefix}_acc_drop", r["accuracy_drop"], step=r["n_drop"])
+        summary["head_drop"] = {"results": head_results}
     return summary
 
 
@@ -623,6 +758,21 @@ def _log_truncation_artifact(summary: dict[str, Any]) -> None:
 
     jsonable: dict[str, Any] = {}
     for mode, payload in summary.items():
+        if mode == "head_drop":
+            jsonable[mode] = [
+                {
+                    k: (
+                        int(v)
+                        if isinstance(v, int) and not isinstance(v, bool)
+                        else float(v)
+                        if isinstance(v, float)
+                        else v
+                    )
+                    for k, v in r.items()
+                }
+                for r in payload["results"]
+            ]
+            continue
         analysis = payload["analysis"]
         jsonable[mode] = {
             "critical_threshold": analysis.get("critical_threshold"),
@@ -644,6 +794,35 @@ def _log_truncation_artifact(summary: dict[str, Any]) -> None:
         with open(path, "w") as f:
             json.dump(jsonable, f, indent=2)
         mlflow.log_artifact(str(path), "truncation")
+
+
+def _log_final_checkpoint(
+    model: torch.nn.Module, config: ScenarioConfig, seed: int, test_accuracy: float
+) -> None:
+    """Save the final weights (+ everything needed to rebuild the model) as
+    ``model/final.pt``. Rebuild directly with ``timm.create_model("vit_tiny_patch16_224",
+    pretrained=False, img_size=image_size, patch_size=patch_size, embed_dim=..., depth=...,
+    num_heads=..., num_classes=...)`` and ``load_state_dict(payload["state_dict"])``; the
+    payload holds only tensors/str/int/float so it loads under ``weights_only=True``."""
+    import tempfile
+
+    payload = {
+        "state_dict": {k: v.detach().cpu() for k, v in model.state_dict().items()},
+        "scenario": config.name,
+        "embed_dim": config.embed_dim,
+        "depth": config.depth,
+        "num_heads": max(1, config.embed_dim // 32),
+        "patch_size": PATCH_SIZE,
+        "image_size": INPUT_IMAGE_SIZE,
+        "num_classes": config.num_classes,
+        "dataset": config.dataset_name,
+        "seed": seed,
+        "test_accuracy": float(test_accuracy),
+    }
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "final.pt"
+        torch.save(payload, path)
+        mlflow.log_artifact(str(path), "model")
 
 
 # =============================================================================
@@ -688,6 +867,10 @@ def run_scenario_experiment(
                     "batch_size": config.batch_size,
                     "learning_rate": config.learning_rate,
                     "seed": seed,
+                    "weight_decay": config.weight_decay,
+                    "train_subsample": config.train_subsample or "full",
+                    "num_eval_samples": config.num_eval_samples,
+                    "study_set": config.study_set or "legacy",
                 }
             )
 
@@ -700,7 +883,9 @@ def run_scenario_experiment(
             mlflow.log_param("num_parameters", num_params)
 
             # Load dataset
-            num_workers = _num_workers_for(device)
+            num_workers = (
+                config.num_workers if config.num_workers is not None else _num_workers_for(device)
+            )
             logger.info(f"Loading dataset: {config.dataset_name}")
             if config.dataset_name == "synthetic":
                 from vision_spectra.data.synthetic import create_synthetic_dataset
@@ -708,8 +893,8 @@ def run_scenario_experiment(
                 train_loader, val_loader, test_loader = create_synthetic_dataset(
                     num_classes=config.num_classes,
                     num_samples_train=config.num_samples or 1000,
-                    num_samples_val=200,
-                    num_samples_test=200,
+                    num_samples_val=config.num_eval_samples,
+                    num_samples_test=config.num_eval_samples,
                     batch_size=config.batch_size,
                     seed=seed,
                     num_workers=num_workers,
@@ -721,12 +906,23 @@ def run_scenario_experiment(
                     name=DatasetName(config.dataset_name),
                     batch_size=config.batch_size,
                     sample_ratio=1.0 if config.num_samples is None else 0.5,
+                    train_subsample=config.train_subsample,
                     num_workers=num_workers,
                 )
                 dataset_obj = get_dataset(dataset_config, data_dir=DATA_DIR)
                 train_loader = dataset_obj.get_train_loader()
                 val_loader = dataset_obj.get_val_loader()
                 test_loader = dataset_obj.get_test_loader()
+
+            # Optimizer-step budget, so the step-count confound (steps track dataset
+            # size) can be read off the run params instead of being re-derived.
+            steps_per_epoch = len(train_loader)
+            mlflow.log_params(
+                {
+                    "steps_per_epoch": steps_per_epoch,
+                    "total_steps": steps_per_epoch * config.epochs,
+                }
+            )
 
             # Setup loss, optimizer, and LR schedule using the SAME recipe as the
             # other experiment families (build_optimizer/build_scheduler/
@@ -738,7 +934,7 @@ def run_scenario_experiment(
             opt_config = OptimizerConfig(
                 name=OptimizerName.ADAMW,
                 learning_rate=config.learning_rate,
-                weight_decay=0.05,
+                weight_decay=config.weight_decay,
                 scheduler=SchedulerName.COSINE,
                 warmup_epochs=5,
             )
@@ -760,14 +956,20 @@ def run_scenario_experiment(
                 logger.info("Logging initial spectral metrics (epoch 0)")
                 analysis = extract_and_analyze_weights(model, device)
                 metrics_history[0] = analysis["aggregated_metrics"]
-                log_spectral_artifacts(analysis, epoch=0)
+                log_spectral_artifacts(analysis, epoch=0, histograms=config.log_histograms)
 
                 for key, value in analysis["aggregated_metrics"].items():
                     if np.isfinite(value):
                         mlflow.log_metric(f"spectral/{key}", value, step=0)
 
                 if probe_batch is not None:
-                    align = record_gradient_alignment(model, probe_batch, criterion, device)
+                    align = record_gradient_alignment(
+                        model,
+                        probe_batch,
+                        criterion,
+                        device,
+                        head_fraction=config.alignment_head_fraction,
+                    )
                     alignment_history[0] = align
                     for key, value in align.items():
                         if np.isfinite(value):
@@ -859,7 +1061,7 @@ def run_scenario_experiment(
                     logger.info(f"Epoch {epoch}: Logging spectral metrics")
                     analysis = extract_and_analyze_weights(model, device)
                     metrics_history[epoch] = analysis["aggregated_metrics"]
-                    log_spectral_artifacts(analysis, epoch=epoch)
+                    log_spectral_artifacts(analysis, epoch=epoch, histograms=config.log_histograms)
 
                     for key, value in analysis["aggregated_metrics"].items():
                         if np.isfinite(value):
@@ -867,7 +1069,13 @@ def run_scenario_experiment(
 
                     # Gradient alignment to the rank-reducing flow at the same epochs.
                     if probe_batch is not None:
-                        align = record_gradient_alignment(model, probe_batch, criterion, device)
+                        align = record_gradient_alignment(
+                            model,
+                            probe_batch,
+                            criterion,
+                            device,
+                            head_fraction=config.alignment_head_fraction,
+                        )
                         alignment_history[epoch] = align
                         for key, value in align.items():
                             if np.isfinite(value):
@@ -889,7 +1097,9 @@ def run_scenario_experiment(
             if final_epoch not in metrics_history:
                 analysis = extract_and_analyze_weights(model, device)
                 metrics_history[final_epoch] = analysis["aggregated_metrics"]
-                log_spectral_artifacts(analysis, epoch=final_epoch)
+                log_spectral_artifacts(
+                    analysis, epoch=final_epoch, histograms=config.log_histograms
+                )
 
                 for key, value in analysis["aggregated_metrics"].items():
                     if np.isfinite(value):
@@ -897,7 +1107,13 @@ def run_scenario_experiment(
 
             # Final-epoch alignment, so the alignment trajectory shares the endpoint.
             if probe_batch is not None and final_epoch not in alignment_history:
-                align = record_gradient_alignment(model, probe_batch, criterion, device)
+                align = record_gradient_alignment(
+                    model,
+                    probe_batch,
+                    criterion,
+                    device,
+                    head_fraction=config.alignment_head_fraction,
+                )
                 alignment_history[final_epoch] = align
                 for key, value in align.items():
                     if np.isfinite(value):
@@ -930,12 +1146,22 @@ def run_scenario_experiment(
                 }
             )
 
+            # Final weights as an artifact so post-hoc probes (new truncation grids,
+            # alignment variants, CCDFs) do not require retraining.
+            if config.save_checkpoint:
+                try:
+                    _log_final_checkpoint(model, config, seed, test_accuracy)
+                except Exception as ckpt_err:  # an artifact failure must not FAIL the run
+                    logger.warning(f"Checkpoint artifact failed: {ckpt_err}")
+
             # Post-training tail-truncation sweep (bulk + head) on the held-out test
             # split. Runs BEFORE cleanup / del model; restores weights internally.
             truncation_summary: dict[str, Any] | None = None
             if config.run_truncation:
                 try:
-                    truncation_summary = run_truncation_analysis(model, test_loader, device)
+                    truncation_summary = run_truncation_analysis(
+                        model, test_loader, device, head_drop_counts=config.head_drop_counts
+                    )
                     _log_truncation_artifact(truncation_summary)
                 except Exception as trunc_err:  # never let truncation sink a finished run
                     logger.warning(f"Truncation analysis failed: {trunc_err}")
@@ -1260,59 +1486,195 @@ def run_all_scenarios(
     console.print("View results with: poetry run mlflow ui --backend-store-uri mlruns/")
 
 
+def _study_job(config: ScenarioConfig, seed: int, device_str: str, output_dir: str) -> dict:
+    """One (cell, seed) run in a worker process; returns a picklable summary."""
+    result = run_scenario_experiment(config, seed, torch.device(device_str), Path(output_dir))
+    return {
+        "tag": config.name,
+        "seed": seed,
+        "success": result.success,
+        "test_accuracy": result.test_accuracy,
+        "best_val_accuracy": result.best_val_accuracy,
+        "final_accuracy": result.final_accuracy,
+        "training_time": result.training_time,
+        "error_message": result.error_message,
+        "final_metrics": result.final_metrics,
+    }
+
+
+def _run_study_parallel(
+    configs: list[ScenarioConfig],
+    seeds: list[int],
+    device: torch.device,
+    output_dir: Path,
+    workers: int,
+) -> None:
+    """Run every (cell, seed) job across ``workers`` spawned processes.
+
+    MLflow's file store copes with concurrent writers as long as the *experiments* exist
+    before the lanes start (two processes racing on ``set_experiment`` can create
+    duplicates), so they are pre-created here. Each lane trains one small ViT; the GPU is
+    shared, and the per-lane DataLoader workers are scaled down (``config.num_workers`` =
+    max(1, 4 // workers)), so the total stays ≈ 4 up to 4 lanes and grows by one per lane
+    beyond that. A hard child crash (e.g. a CUDA abort) breaks the pool; the remaining jobs
+    are then reported as failed and can be re-run with ``--cells``/``--seeds``.
+    """
+    import multiprocessing as mp
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+
+    mlflow.set_tracking_uri(str(output_dir))
+    for config in configs:
+        mlflow.set_experiment(f"spectral_{config.name}")
+
+    jobs = [(config, seed) for config in configs for seed in seeds]
+    per_cell: dict[str, list[ScenarioResult]] = {c.name: [] for c in configs}
+    console.print(f"  [bold]{len(jobs)} jobs across {workers} lanes[/bold]\n")
+    with ProcessPoolExecutor(max_workers=workers, mp_context=mp.get_context("spawn")) as pool:
+        futures = {
+            pool.submit(_study_job, config, seed, str(device), str(output_dir)): (config, seed)
+            for config, seed in jobs
+        }
+        for fut in as_completed(futures):
+            config, seed = futures[fut]
+            try:
+                r = fut.result()
+            except Exception as exc:  # a crashed lane must not sink the study
+                r = {
+                    "tag": config.name,
+                    "seed": seed,
+                    "success": False,
+                    "test_accuracy": 0.0,
+                    "best_val_accuracy": 0.0,
+                    "final_accuracy": 0.0,
+                    "training_time": 0.0,
+                    "error_message": str(exc),
+                    "final_metrics": {},
+                }
+            per_cell[config.name].append(
+                ScenarioResult(
+                    scenario=config.scenario,
+                    seed=seed,
+                    success=r["success"],
+                    final_accuracy=r["final_accuracy"],
+                    best_val_accuracy=r["best_val_accuracy"],
+                    final_metrics=r["final_metrics"],
+                    metrics_history={},
+                    training_time=r["training_time"],
+                    error_message=r["error_message"],
+                    test_accuracy=r["test_accuracy"],
+                )
+            )
+            status = (
+                f"✓ test={r['test_accuracy']:.2f}% ({r['training_time']:.0f}s)"
+                if r["success"]
+                else f"✗ {r['error_message']}"
+            )
+            console.print(f"  [cyan]{config.name} seed {seed}[/cyan] {status}")
+
+    for config in configs:
+        console.print(f"\n[bold blue]{config.name}[/bold blue] — {config.description}")
+        _print_scenario_summary(sorted(per_cell[config.name], key=lambda x: x.seed))
+
+
 @app.command("run-study")
 def run_study(
     tier: int = typer.Option(1, "--tier", "-t", help="1=width sweep, 2=+depth/datasets, 3=+A-F"),
+    study_set: str = typer.Option(
+        "tiers", "--set", help="tiers (uses --tier) | followup | followup-wide"
+    ),
     num_seeds: int = typer.Option(10, "--num-seeds", "-n", help="Seeds per cell"),
+    seeds_csv: str = typer.Option(
+        "", "--seeds", help="Explicit comma-separated seeds (overrides --num-seeds)"
+    ),
+    cells_csv: str = typer.Option(
+        "", "--cells", help="Comma-separated cell tags to run (subset of the set)"
+    ),
+    workers: int = typer.Option(
+        1, "--workers", "-w", help="Parallel (cell, seed) lanes as separate processes"
+    ),
     device: DeviceChoice = typer.Option(DeviceChoice.AUTO, "--device"),
     output_dir: Path = typer.Option(None, "--output", "-o"),
     alignment: bool = typer.Option(True, "--alignment/--no-alignment"),
     truncation: bool = typer.Option(True, "--truncation/--no-truncation"),
+    save_checkpoints: bool | None = typer.Option(
+        None,
+        "--save-checkpoints/--no-save-checkpoints",
+        help="Log final weights per run (default: on for follow-up sets, off for tiers)",
+    ),
 ) -> None:
     """Turnkey capacity × complexity study (EXPERIMENT_PLAN_V2). One command runs the
-    whole tier × seeds grid with gradient-alignment + tail-truncation on by default.
+    whole set × seeds grid with gradient-alignment + tail-truncation on by default.
 
-    Intended for a CUDA VM, e.g.::
+    Intended for a CUDA box, e.g.::
 
         vision-spectra spectral run-study --tier 1 --num-seeds 10 --device cuda
+        vision-spectra spectral run-study --set followup --num-seeds 10 --workers 4 --device cuda
+        vision-spectra spectral run-study --set followup --cells w192_synlong,w192_pathshort
     """
     resolved_output = output_dir or MLRUNS_DIR
     resolved_device = resolve_device(device)
 
-    configs = build_study_configs(tier)
-    seeds = [42 + i * 100 for i in range(num_seeds)]
+    configs = build_study_set(study_set, tier)
+    if cells_csv.strip():
+        wanted = {c.strip() for c in cells_csv.split(",") if c.strip()}
+        unknown = wanted - {c.name for c in configs}
+        if unknown:
+            raise typer.BadParameter(f"unknown cells {sorted(unknown)} for set {study_set!r}")
+        configs = [c for c in configs if c.name in wanted]
+    seeds = (
+        [int(x) for x in seeds_csv.split(",") if x.strip()]
+        if seeds_csv.strip()
+        else [42 + i * 100 for i in range(num_seeds)]
+    )
+    if save_checkpoints is None:
+        save_checkpoints = study_set != "tiers"
+    workers = max(1, workers)
+    lane_loader_workers = (
+        max(1, _num_workers_for(resolved_device) // workers) if workers > 1 else None
+    )
 
+    label = f"Tier {tier}" if study_set == "tiers" else f"set {study_set}"
+    console.print(f"\n[bold magenta]═══ Capacity × Complexity Study — {label} ═══[/bold magenta]")
     console.print(
-        f"\n[bold magenta]═══ Capacity × Complexity Study — Tier {tier} ═══[/bold magenta]"
+        f"  Cells: {len(configs)}  ·  Seeds/cell: {len(seeds)}  ·  Total runs: "
+        f"{len(configs) * len(seeds)}  ·  lanes: {workers}"
     )
     console.print(
-        f"  Cells: {len(configs)}  ·  Seeds/cell: {num_seeds}  ·  Total runs: "
-        f"{len(configs) * num_seeds}"
+        f"  Device: {resolved_device}  ·  alignment={alignment} truncation={truncation} "
+        f"checkpoints={save_checkpoints}"
     )
-    console.print(f"  Device: {resolved_device}  ·  alignment={alignment} truncation={truncation}")
     console.print(f"  Output: {resolved_output}\n")
 
-    for cfg_idx, config in enumerate(configs, start=1):
+    for config in configs:
         config.seeds = seeds
         config.run_alignment = alignment
         config.run_truncation = truncation
-        console.print(
-            f"[bold blue][{cfg_idx}/{len(configs)}] {config.name}[/bold blue] "
-            f"— {config.description}"
-        )
-        cell_results = []
-        for seed in seeds:
-            console.print(f"  [cyan]seed {seed}...[/cyan]")
-            result = run_scenario_experiment(config, seed, resolved_device, resolved_output)
-            cell_results.append(result)
-            if result.success:
-                console.print(
-                    f"    ✓ test={result.test_accuracy:.2f}% "
-                    f"val={result.best_val_accuracy:.2f}% ({result.training_time:.1f}s)"
-                )
-            else:
-                console.print(f"    ✗ failed: {result.error_message}")
-        _print_scenario_summary(cell_results)
+        config.save_checkpoint = save_checkpoints
+        config.study_set = study_set if study_set != "tiers" else f"tier{tier}"
+        if lane_loader_workers is not None:
+            config.num_workers = lane_loader_workers if resolved_device.type == "cuda" else 0
+
+    if workers > 1:
+        _run_study_parallel(configs, seeds, resolved_device, resolved_output, workers)
+    else:
+        for cfg_idx, config in enumerate(configs, start=1):
+            console.print(
+                f"[bold blue][{cfg_idx}/{len(configs)}] {config.name}[/bold blue] "
+                f"— {config.description}"
+            )
+            cell_results = []
+            for seed in seeds:
+                console.print(f"  [cyan]seed {seed}...[/cyan]")
+                result = run_scenario_experiment(config, seed, resolved_device, resolved_output)
+                cell_results.append(result)
+                if result.success:
+                    console.print(
+                        f"    ✓ test={result.test_accuracy:.2f}% "
+                        f"val={result.best_val_accuracy:.2f}% ({result.training_time:.1f}s)"
+                    )
+                else:
+                    console.print(f"    ✗ failed: {result.error_message}")
+            _print_scenario_summary(cell_results)
 
     console.print("\n[bold green]Study complete.[/bold green]")
     console.print("Generate figures with: poetry run vision-spectra figures all")

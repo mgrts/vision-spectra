@@ -42,6 +42,7 @@ class SyntheticImageDataset(Dataset):
         num_channels: int = 3,
         seed: int = 42,
         transform=None,
+        cache: bool = True,
     ) -> None:
         self.num_samples = num_samples
         self.num_classes = min(num_classes, len(SHAPES))
@@ -55,6 +56,19 @@ class SyntheticImageDataset(Dataset):
         self.labels = rng.randint(0, self.num_classes, size=num_samples)
         self.sample_seeds = rng.randint(0, 2**31, size=num_samples)
 
+        # Render every image ONCE into a uint8 array. Drawing with PIL inside
+        # __getitem__ made the synthetic arm CPU-bound (~0.25 s/step in the June-2026
+        # study); with the cache an epoch costs only the (augmenting) transform. The
+        # images are identical to the on-the-fly path because every sample is rendered
+        # from its own fixed seed.
+        self._cache: np.ndarray | None = None
+        if cache:
+            frames = [
+                np.asarray(self._generate_image(int(lbl), int(sd)))
+                for lbl, sd in zip(self.labels, self.sample_seeds, strict=True)
+            ]
+            self._cache = np.stack(frames).astype(np.uint8)
+
     def __len__(self) -> int:
         return self.num_samples
 
@@ -62,8 +76,11 @@ class SyntheticImageDataset(Dataset):
         label = int(self.labels[idx])
         sample_seed = int(self.sample_seeds[idx])
 
-        # Generate image deterministically based on sample seed
-        image = self._generate_image(label, sample_seed)
+        # Generate image deterministically based on sample seed (or read the cache)
+        if self._cache is not None:
+            image = Image.fromarray(self._cache[idx])
+        else:
+            image = self._generate_image(label, sample_seed)
 
         if self.transform:
             image = self.transform(image)
@@ -288,6 +305,7 @@ def create_synthetic_dataset(
         shuffle=True,
         num_workers=num_workers,
         pin_memory=False,
+        persistent_workers=num_workers > 0,
     )
 
     val_loader = DataLoader(
@@ -296,6 +314,7 @@ def create_synthetic_dataset(
         shuffle=False,
         num_workers=num_workers,
         pin_memory=False,
+        persistent_workers=num_workers > 0,
     )
 
     test_loader = DataLoader(
@@ -304,6 +323,7 @@ def create_synthetic_dataset(
         shuffle=False,
         num_workers=num_workers,
         pin_memory=False,
+        persistent_workers=num_workers > 0,
     )
 
     return train_loader, val_loader, test_loader

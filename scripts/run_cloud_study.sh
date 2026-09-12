@@ -4,23 +4,27 @@
 # See references/docs/EXPERIMENT_PLAN_V2.md and references/docs/CLOUD_RUN.md.
 #
 # Usage (on a fresh Ubuntu + NVIDIA GPU VM, repo already cloned):
-#     bash scripts/run_cloud_study.sh [TIER] [NUM_SEEDS] [DEVICE]
+#     bash scripts/run_cloud_study.sh [TIER] [NUM_SEEDS] [DEVICE] [WORKERS]
+#     STUDY_SET=followup bash scripts/run_cloud_study.sh - 10 cuda 4
 # Examples:
-#     bash scripts/run_cloud_study.sh 1 10 cuda     # Tier-1 spine, 10 seeds (default)
-#     bash scripts/run_cloud_study.sh 3 10 cuda     # full study incl. depth/datasets/A-F
+#     bash scripts/run_cloud_study.sh 1 10 cuda        # Tier-1 spine, 10 seeds (default)
+#     bash scripts/run_cloud_study.sh 3 10 cuda        # full study incl. depth/datasets/A-F
+#     STUDY_SET=followup bash scripts/run_cloud_study.sh - 10 cuda 4   # Sept-2026 controls, 4 lanes
 #
-# Produces:  mlruns/  +  spectral_study_mlruns_<tier>.tar.gz  (copy this back).
+# Produces:  mlruns/  +  spectral_study_mlruns_<tier|set>.tar.gz  (copy this back).
 set -euo pipefail
 
 TIER="${1:-1}"
 NUM_SEEDS="${2:-10}"
 DEVICE="${3:-cuda}"
+WORKERS="${4:-1}"
+STUDY_SET="${STUDY_SET:-tiers}"   # tiers | followup | followup-wide
 
 cd "$(dirname "$0")/.."
 REPO_ROOT="$(pwd)"
 echo "=== vision-spectra cloud study ==="
 echo "  repo:   ${REPO_ROOT}"
-echo "  tier:   ${TIER}   seeds: ${NUM_SEEDS}   device: ${DEVICE}"
+echo "  set:    ${STUDY_SET}   tier: ${TIER}   seeds: ${NUM_SEEDS}   device: ${DEVICE}   lanes: ${WORKERS}"
 
 # --- 1. Environment -----------------------------------------------------------
 if ! command -v poetry >/dev/null 2>&1; then
@@ -42,26 +46,32 @@ PY
 # --- 2. Data ------------------------------------------------------------------
 # Tier 1 needs PathMNIST; Tier >=2 also Blood/DermaMNIST. Synthetic is generated on the fly.
 DATASETS=(pathmnist)
-if [ "${TIER}" -ge 2 ]; then DATASETS+=(bloodmnist dermamnist); fi
+if [ "${STUDY_SET}" = "tiers" ] && [ "${TIER}" -ge 2 ]; then DATASETS+=(bloodmnist dermamnist); fi
 for ds in "${DATASETS[@]}"; do
   echo "[data] download ${ds}"
   poetry run vision-spectra download-data --dataset "${ds}"
 done
 
 # --- 3. Run the study ---------------------------------------------------------
-echo "[run] spectral run-study --tier ${TIER} --num-seeds ${NUM_SEEDS} --device ${DEVICE}"
+if [ "${STUDY_SET}" = "tiers" ]; then
+  SET_ARGS=(--set tiers --tier "${TIER}")
+else
+  SET_ARGS=(--set "${STUDY_SET}")
+fi
+echo "[run] spectral run-study ${SET_ARGS[*]} --num-seeds ${NUM_SEEDS} --device ${DEVICE} --workers ${WORKERS}"
 time poetry run vision-spectra spectral run-study \
-  --tier "${TIER}" \
+  "${SET_ARGS[@]}" \
   --num-seeds "${NUM_SEEDS}" \
-  --device "${DEVICE}"
+  --device "${DEVICE}" \
+  --workers "${WORKERS}"
 
 # --- 4. Figures (best-effort; safe to skip if it errors) ----------------------
 echo "[figures] generating publication outputs (best-effort)"
 poetry run vision-spectra figures all || echo "[figures] skipped/failed — regenerate locally from mlruns"
 
 # --- 5. Package results -------------------------------------------------------
-OUT="spectral_study_mlruns_tier${TIER}.tar.gz"
-echo "[package] ${OUT}"
-tar -czf "${OUT}" mlruns/ $( [ -d references/figures ] && echo references/figures )
+if [ "${STUDY_SET}" = "tiers" ]; then OUT="spectral_study_mlruns_tier${TIER}.tar.gz"; else OUT="spectral_study_mlruns_${STUDY_SET}.tar.gz"; fi
+echo "[package] ${OUT} (histogram PNGs excluded; regenerable from singular_values.json)"
+tar --exclude='*/histograms' -czf "${OUT}" mlruns/ $( [ -d references/figures ] && echo references/figures )
 echo "=== DONE. Copy back: ${REPO_ROOT}/${OUT} ==="
 echo "    e.g.  scp <vm>:${REPO_ROOT}/${OUT} ./   then  tar xzf ${OUT}"

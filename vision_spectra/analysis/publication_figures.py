@@ -42,6 +42,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import mlflow
 import numpy as np
+import pandas as pd
 import typer
 from loguru import logger
 from rich.console import Console
@@ -164,6 +165,49 @@ def get_mlflow_client() -> mlflow.MlflowClient:
     return mlflow.MlflowClient()
 
 
+def select_latest_run_per_seed(runs):
+    """Keep one run per ``params.seed`` (the most recent ``start_time``).
+
+    Re-running a cell (to add probes, or to fill gaps) appends runs to the same MLflow
+    experiment; without this, a seed would be counted twice and n inflated. Runs with no
+    seed param are kept as-is.
+    """
+    if runs is None or runs.empty or "params.seed" not in runs.columns:
+        return runs
+    # Rows without a seed param are kept untouched (pandas would otherwise treat all
+    # None/NaN seeds as one duplicate group and collapse them to a single run).
+    has_seed = runs["params.seed"].notna()
+    seeded = runs[has_seed]
+    if "start_time" in runs.columns:
+        seeded = seeded.sort_values("start_time", kind="stable")
+    latest = seeded.drop_duplicates(subset="params.seed", keep="last")
+    dropped = len(seeded) - len(latest)
+    if dropped:
+        logger.info(f"Deduplicated {dropped} superseded run(s) by seed (kept the latest per seed)")
+    if len(latest) > 1:
+        # A partial re-run (some seeds redone, others not) would silently mix configurations;
+        # warn when the retained runs disagree on provenance / training knobs.
+        for col in (
+            "params.study_set",
+            "params.weight_decay",
+            "params.train_subsample",
+            "params.total_steps",
+            "params.epochs",
+        ):
+            if col in latest.columns and latest[col].nunique(dropna=False) > 1:
+                logger.warning(
+                    f"Retained runs disagree on {col} ({sorted(map(str, latest[col].unique()))}); "
+                    "a partial re-run is mixed with older runs — re-run the missing seeds."
+                )
+        if "start_time" in latest.columns:
+            span = latest["start_time"].max() - latest["start_time"].min()
+            if hasattr(span, "days") and span.days > 30:
+                logger.warning(
+                    f"Retained runs span {span.days} days across seeds; check params per seed."
+                )
+    return pd.concat([runs[~has_seed], latest]).reset_index(drop=True)
+
+
 def extract_scenario_metrics(scenario: str) -> ScenarioMetrics | None:
     """Extract metrics for a scenario from MLflow.
 
@@ -187,6 +231,7 @@ def extract_scenario_metrics(scenario: str) -> ScenarioMetrics | None:
     if runs.empty:
         logger.warning(f"No finished runs for experiment '{experiment_name}'")
         return None
+    runs = select_latest_run_per_seed(runs)
 
     # Prefer the held-out TEST accuracy (unbiased) when present, then fall back
     # to the (optimistically biased) best-validation accuracy for older runs.

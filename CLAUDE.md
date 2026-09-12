@@ -42,16 +42,17 @@ driven through the `vision-spectra` Typer CLI (`vision_spectra/cli.py`).
   `synthetic.py`, `transforms.py`.
 - `vision_spectra/experiments/` — `run_spectral_analysis.py` (the headline 6-scenario study +
   the `run-study` capacity×complexity sweep; `SCENARIO_CONFIGS`, `build_study_configs`,
+  `build_followup_configs` / `build_study_set` (Sept-2026 controls: `--set followup`),
   `create_model_for_scenario`, `run_scenario_experiment`, `record_gradient_alignment`,
-  `run_truncation_analysis`), `run_classification_experiments.py` (loss comparison),
-  `run_synthetic_experiments.py`.
+  `run_truncation_analysis`, `_run_study_parallel` (`--workers N` spawned lanes)),
+  `run_classification_experiments.py` (loss comparison), `run_synthetic_experiments.py`.
 - `vision_spectra/analysis/publication_figures.py` — reads MLflow → A-F figures/tables/stats;
   `study_figures.py` — reads the `spectral_*` sweep cells → width-sweep / alignment /
   truncation figures (`figures study`, folded into `figures all`).
 - `vision_spectra/utils/` — `reproducibility.py` (re-exports canonical seed/device +
   `count_parameters`), `checkpointing.py`, `logging.py`, `visualization.py`.
 - `tests/` — `test_data.py`, `test_losses.py`, `test_metrics.py`, `test_training.py`,
-  `test_spectral_study.py` (plain pytest, **97 tests**; get the live count with
+  `test_spectral_study.py` (plain pytest, **109 tests**; get the live count with
   `poetry run pytest --collect-only -q`).
 
 ## How to run
@@ -62,6 +63,7 @@ vision-spectra --help
 
 vision-spectra train-cls --dataset synthetic --epochs 2 --batch-size 8 --smoke-test
 vision-spectra spectral run-all --num-seeds 10        # the 6-scenario study (≥10 seeds)
+vision-spectra spectral run-study --set followup --num-seeds 10 --workers 4 --device cuda  # Sept-2026 controls
 vision-spectra figures all                            # MLflow -> figures/tables/stats
 vision-spectra experiments run --losses cross_entropy focal   # loss comparison
 ```
@@ -152,17 +154,43 @@ No Makefile. Tooling is invoked directly:
 - The 6-scenario `run_spectral_analysis.py` reports best-of-K val accuracy historically but
   now also logs `final/test_accuracy`; it trains a FIXED epoch budget (no early stopping) so
   Δα is measured at a common endpoint across scenarios — that's deliberate.
-- `gradient_alignment.py` and `tail_truncation.py` are now wired into `run_scenario_experiment`
+- `gradient_alignment.py` and `tail_truncation.py` are wired into `run_scenario_experiment`
   / `run-study` (logged as `alignment/*` and `truncation/*`); they are still NOT used by the
-  loss/MIM experiment families. `tail_truncation` supports two modes: `bulk` (Eckart-Young,
-  removes the SMALLEST singular values — effective-rank probe) and `head` (removes the LARGEST
-  / heavy-tail outliers — signal-vs-noise probe). `bulk` is not heavy-tail ablation; `head` is.
+  loss/MIM experiment families. **Alignment has two probes from one SVD:** the legacy
+  `cos_sim_mean` = cos(∇L, U Vᵀ) is bounded by 1/√rank and was ≈ 0 in every June-2026 cell
+  (a null by construction — do not present it as a finding); the informative one is the
+  subspace probe: `cos_head_mean` (>0 ⇔ the SGD step grows the top-k σ), `cos_tail_mean`
+  (>0 ⇔ the step shrinks the tail = rank-reducing), `*_energy_enrichment_mean` (1 = no
+  preference) and per-type `{q,k,v,proj,fc1,fc2}_cos_*`; the fused `attn.qkv` is split into
+  Q/K/V to match the extraction (so `cos_sim_mean` values from runs after 2026-09-12 are not
+  numerically comparable with the June-2026 store). `tail_truncation` has THREE probes: `bulk` (Eckart-Young,
+  removes the SMALLEST σ — effective-rank probe), `head` by ratio (removes the LARGEST 10 %+;
+  too coarse — collapses every model at its first grid point) and **head-drop** (absolute
+  top-`n` σ per matrix, Q/K/V split; `truncation/headn_acc` step = n, per-group
+  `headn_{qkv,proj,mlp}_acc`). `bulk` is not heavy-tail ablation; `head`/`headn` are.
+- **Re-running a cell appends runs to the same MLflow experiment.** Both figure readers
+  (`publication_figures.extract_scenario_metrics`, `study_figures.extract_study_cell`) keep the
+  LATEST run per `params.seed` (`select_latest_run_per_seed`), so a rerun replaces, never
+  double-counts. Run params now include `steps_per_epoch` / `total_steps` / `weight_decay` /
+  `train_subsample`; follow-up runs log `model/final.pt` (state_dict + rebuild fields) and no
+  histogram PNGs (`ScenarioConfig.log_histograms`, default off; SV JSON keeps everything).
+- **Step-count confound.** PathMNIST ≈ 70k optimizer steps vs synthetic ≈ 1k; Blood/Derma sit
+  between and the Hill ordering follows steps exactly, and cosine-to-zero LR forces a plateau at
+  every run's end. `--set followup` holds the step-matched controls (`w192_synlong`,
+  `w192_pathshort` via `DatasetConfig.train_subsample`, TRAIN-only), the wd-ablation cells and
+  the width-sweep rerun. Synthetic images are rendered once into a uint8 cache
+  (`SyntheticImageDataset(cache=True)`, identical tensors) — the June run was data-path bound,
+  not SVD bound.
 - `publication_figures.py` is a single ~1.2k-line module (MLflow extraction + stats +
   plotting + LaTeX + CLI). Splitting it is desirable but deferred; when editing, keep the
   metric-key reads in `extract_scenario_metrics` in sync with what the runners log.
 - Cross-scenario accuracy mixes 3-class synthetic with 9-class PathMNIST (different chance
   levels); Δα-vs-accuracy is observational/confounded by capacity — keep the language
   correlational, never causal.
+- **λ_decay reverses the width ordering.** Its 10–60 % fit window reaches into the tail of a
+  48-dim spectrum, so it says "narrower = steeper" while α_Hill / relative Δr_s say "wider =
+  heavier / more collapsed". The A–F `delta_alpha_bar` / `statistical_tests.json` still headline
+  Δλ; treat them as secondary until switched to Δα_Hill / rel Δr_s (`EXPERIMENT_PLAN_V2` §9).
 
 ## What NOT to commit
 

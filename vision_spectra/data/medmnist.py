@@ -213,6 +213,14 @@ class MedMNISTDataset(BaseDataset):
             val_labels = val_labels[val_indices]
             test_labels = test_labels[test_indices]
 
+        # Absolute TRAIN-only subsample (step-matched controls): val/test stay full so the
+        # reported test accuracy remains the unbiased full-split estimate.
+        train_subsample = self.config.train_subsample
+        if train_subsample is not None and train_subsample < len(train_labels):
+            sub = self._get_stratified_count_indices(train_labels, train_subsample)
+            train_indices = sub if train_indices is None else train_indices[sub]
+            train_labels = train_labels[sub]
+
         self._train_dataset = MedMNISTWrapper(train_base, train_transform, train_indices)
         self._val_dataset = MedMNISTWrapper(val_base, eval_transform, val_indices)
         self._test_dataset = MedMNISTWrapper(test_base, eval_transform, test_indices)
@@ -266,6 +274,33 @@ class MedMNISTDataset(BaseDataset):
             selected_indices.extend(sampled)
 
         return np.array(sorted(selected_indices))
+
+    @staticmethod
+    def _get_stratified_count_indices(labels: np.ndarray, total: int) -> np.ndarray:
+        """Stratified indices for an ABSOLUTE sample size ``total`` (largest-remainder
+        allocation across classes, ≥1 per class). Uses the global numpy RNG like
+        ``_get_stratified_indices`` (seeded by ``set_seed`` upstream)."""
+        classes, counts = np.unique(labels, return_counts=True)
+        total = int(min(total, len(labels)))
+        quota = counts / counts.sum() * total
+        alloc = np.floor(quota).astype(int)
+        alloc = np.maximum(alloc, 1)
+        # distribute the remainder to the largest fractional parts
+        remainder = total - alloc.sum()
+        if remainder > 0:
+            order = np.argsort(-(quota - np.floor(quota)))
+            for i in order[:remainder]:
+                alloc[i] += 1
+        elif remainder < 0:
+            order = np.argsort(-alloc)
+            for i in order[:-remainder]:
+                alloc[i] = max(1, alloc[i] - 1)
+        selected: list[int] = []
+        for cls, n in zip(classes, alloc, strict=True):
+            cls_idx = np.where(labels == cls)[0]
+            n = int(min(n, len(cls_idx)))
+            selected.extend(np.random.choice(cls_idx, size=n, replace=False))
+        return np.array(sorted(selected))
 
     def get_train_dataset(self) -> Dataset:
         assert self._train_dataset is not None

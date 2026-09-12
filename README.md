@@ -131,6 +131,12 @@ The research is structured around six scenarios that vary network capacity (`emb
 poetry run vision-spectra spectral run-study --tier 3 --num-seeds 10 --device cuda
 # tiers: 1 = width sweep (spine), 2 = + depth sweep + extra datasets, 3 = + A–F grid.
 
+# Follow-up controls (EXPERIMENT_PLAN_V2 §9): step-matched synthetic/PathMNIST cells, the
+# weight-decay ablation and the width sweep re-run with the redefined alignment + head-drop
+# probes; saves final checkpoints; --workers runs (cell, seed) jobs in parallel processes.
+poetry run vision-spectra spectral run-study --set followup --num-seeds 10 --workers 4 --device cuda
+poetry run vision-spectra spectral run-study --set followup --cells w192_synlong,w192_pathshort --seeds 42,142
+
 # Or just the original six scenarios:
 poetry run python -m vision_spectra.experiments.run_spectral_analysis run-all \
     --num-seeds 3 \
