@@ -314,7 +314,6 @@ def create_synthetic_dataset(
         shuffle=False,
         num_workers=num_workers,
         pin_memory=False,
-        persistent_workers=num_workers > 0,
     )
 
     test_loader = DataLoader(
@@ -323,7 +322,6 @@ def create_synthetic_dataset(
         shuffle=False,
         num_workers=num_workers,
         pin_memory=False,
-        persistent_workers=num_workers > 0,
     )
 
     return train_loader, val_loader, test_loader

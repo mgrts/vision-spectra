@@ -1666,10 +1666,18 @@ def run_study(
         config.study_set = study_set if study_set != "tiers" else f"tier{tier}"
         if lane_loader_workers is not None:
             config.num_workers = lane_loader_workers if resolved_device.type == "cuda" else 0
-    total_procs = workers * (1 + (lane_loader_workers or _num_workers_for(resolved_device)))
+    per_lane_loaders = (
+        lane_loader_workers
+        if lane_loader_workers is not None
+        else _num_workers_for(resolved_device)
+    )
+    # Steady state: each lane = 1 trainer + persistent train-loader workers; the val/test
+    # loaders spawn the same number of workers transiently while they iterate.
+    steady = workers * (1 + per_lane_loaders)
+    peak = workers * (1 + 2 * per_lane_loaders)
     console.print(
-        f"  Loader workers/lane: {lane_loader_workers if lane_loader_workers is not None else 'auto'}"
-        f"  ·  ≈{total_procs} processes on {os.cpu_count()} cores\n"
+        f"  Loader workers/lane: {per_lane_loaders}  ·  ≈{steady} processes steady, "
+        f"≈{peak} peak, on {os.cpu_count()} cores\n"
     )
 
     if workers > 1:

@@ -85,6 +85,9 @@ class BaseDataset(ABC):
             num_workers=self.config.num_workers,
             pin_memory=self._pin_memory,
             drop_last=True,
+            # Only the train loader keeps its workers alive between epochs: val/test loaders
+            # are iterated once per epoch (or once), and persistent workers there would idle
+            # for the whole run on a shared machine.
             persistent_workers=self.config.num_workers > 0,
         )
 
@@ -97,7 +100,6 @@ class BaseDataset(ABC):
             num_workers=self.config.num_workers,
             pin_memory=self._pin_memory,
             drop_last=False,
-            persistent_workers=self.config.num_workers > 0,
         )
 
     def get_test_loader(self) -> DataLoader:
@@ -109,7 +111,6 @@ class BaseDataset(ABC):
             num_workers=self.config.num_workers,
             pin_memory=self._pin_memory,
             drop_last=False,
-            persistent_workers=self.config.num_workers > 0,
         )
 
 
