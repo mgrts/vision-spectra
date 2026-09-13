@@ -334,6 +334,20 @@ class TestFollowupStudy:
         long_syn = expected_total_steps(cells["w192_synlong"])
         path = expected_total_steps(cells["w192_path"])
         assert abs(long_syn - path) / path < 0.01  # ≈70k steps both
+        long_1k = expected_total_steps(cells["w192_synlong1k"])
+        assert abs(long_1k - path) / path < 0.01  # steps-only control, same ≈70k budget
+        assert cells["w192_synlong1k"].num_samples == 1000
+        assert cells["w192_synlong1k"].epochs == 2200
+        # spectral snapshots land at the same step counts as the 50-epoch cells
+        le = cells["w192_synlong1k"].log_epochs
+        assert le[0] == 0 and le[-1] == 2154 and 220 in le and 1319 in le  # final logged by runner
+        assert cells["w192_synlong1k"].val_every == 44
+        assert cells["w192_synlong1k"].warmup_epochs == 220
+        assert all(
+            c.val_every == 1 and c.warmup_epochs == 5
+            for n, c in cells.items()
+            if n != "w192_synlong1k"
+        )
         short_path = expected_total_steps(cells["w192_pathshort"])
         syn = expected_total_steps(cells["w192_syn"])
         assert abs(short_path - syn) / syn < 0.05  # ≈0.9k steps both
@@ -382,8 +396,8 @@ class TestFollowupStudy:
         from vision_spectra.experiments.run_spectral_analysis import build_study_set
 
         assert len(build_study_set("tiers", 1)) == 8
-        assert len(build_study_set("followup")) == 12
-        assert len(build_study_set("followup-wide")) == 14
+        assert len(build_study_set("followup")) == 13
+        assert len(build_study_set("followup-wide")) == 15
         with pytest.raises(ValueError):
             build_study_set("nope")
 

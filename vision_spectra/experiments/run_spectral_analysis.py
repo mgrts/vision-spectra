@@ -155,6 +155,8 @@ class ScenarioConfig:
     head_drop_counts: tuple[int, ...] = (1, 2, 3, 5, 10)  # head-drop probe (absolute n)
     num_workers: int | None = None  # DataLoader workers; None → auto (4 on CUDA else 0)
     study_set: str = ""  # provenance: which run-study set produced the run ("" = legacy)
+    val_every: int = 1  # validate every N epochs (always at logged epochs and the last one)
+    warmup_epochs: int = 5  # LR warmup length in epochs (scaled for long-epoch cells)
 
     @property
     def scenario_label(self) -> str:
@@ -371,11 +373,22 @@ def _variant(base: ScenarioConfig, tag: str, description: str, **overrides: Any)
     return replace(base, scenario=tag, description=description, **overrides)
 
 
+def _scale_log_epochs(
+    epochs: list[int], from_steps_per_epoch: int, to_steps_per_epoch: int
+) -> list[int]:
+    """Map a logging schedule to a cell with a different epoch length so the spectral
+    snapshots fall at (approximately) the SAME optimizer-step counts."""
+    scaled = sorted({round(e * from_steps_per_epoch / to_steps_per_epoch) for e in epochs})
+    return [e for e in scaled if e >= 0]
+
+
 def build_followup_configs(wide: bool = False) -> list[ScenarioConfig]:
     """Cells for the follow-up run (see RESULTS_TIER3_JUNE2026.md §4):
 
     1. ``w192_synlong``  — synthetic, 90k images × 50 epochs @ bs 64 ⇒ ≈70k optimizer steps,
        i.e. STEP-MATCHED to ``w192_path`` (the "is complexity just training length?" control).
+       ``w192_synlong1k`` — the SAME 1k images as ``w192_syn`` × 2200 epochs @ bs 32 ⇒ ≈70k
+       steps: separates steps from data volume.
     2. ``w192_pathshort`` — PathMNIST with a 1k-image stratified TRAIN subsample × 30 epochs
        @ bs 32 ⇒ ≈0.9k steps, step-matched to ``w192_syn`` (val/test stay full).
     3. ``w192_path_wd0`` / ``w384_path_wd0`` — weight-decay ablation (mechanism control).
@@ -408,6 +421,23 @@ def build_followup_configs(wide: bool = False) -> list[ScenarioConfig]:
             epochs=30,
             batch_size=32,
             log_epochs=list(_LOG_EPOCHS_SIMPLE),
+        ),
+        # Same 1k synthetic images as w192_syn, trained for the PathMNIST budget: separates
+        # optimizer STEPS from data VOLUME (w192_synlong changes both). Spectral logging is
+        # scheduled at the same step counts as the 50-epoch cells (32 steps/epoch here).
+        _variant(
+            w192_syn,
+            "w192_synlong1k",
+            "w192 on synthetic-1k × 2200 ep @ bs 32 (≈70k steps: steps-only control)",
+            num_samples=1000,
+            epochs=2200,
+            batch_size=32,
+            log_epochs=_scale_log_epochs(
+                _LOG_EPOCHS_COMPLEX, from_steps_per_epoch=1407, to_steps_per_epoch=32
+            ),
+            num_eval_samples=2000,
+            val_every=44,  # ≈ one 50-epoch-cell epoch (1407 steps) between validations
+            warmup_epochs=220,  # ≈ 5 × 1407 steps, the warmup the 50-epoch cells get
         ),
         _variant(
             w192_path, "w192_path_wd0", "w192 on PathMNIST, weight decay 0", weight_decay=0.0
@@ -872,6 +902,8 @@ def run_scenario_experiment(
                     "train_subsample": config.train_subsample or "full",
                     "num_eval_samples": config.num_eval_samples,
                     "study_set": config.study_set or "legacy",
+                    "val_every": config.val_every,
+                    "warmup_epochs": config.warmup_epochs,
                 }
             )
 
@@ -937,7 +969,7 @@ def run_scenario_experiment(
                 learning_rate=config.learning_rate,
                 weight_decay=config.weight_decay,
                 scheduler=SchedulerName.COSINE,
-                warmup_epochs=5,
+                warmup_epochs=config.warmup_epochs,
             )
             optimizer = build_optimizer(model, opt_config)
             scheduler = build_scheduler(optimizer, opt_config, config.epochs)
@@ -979,6 +1011,7 @@ def run_scenario_experiment(
             # Training loop
             best_val_accuracy = 0.0
             final_accuracy = 0.0
+            val_accuracy = float("nan")
 
             for epoch in range(1, config.epochs + 1):
                 # Training
@@ -1019,43 +1052,51 @@ def run_scenario_experiment(
                 train_accuracy = 100.0 * train_correct / train_total
                 avg_train_loss = train_loss / len(train_loader)
 
-                # Validation
-                model.eval()
-                val_correct = 0
-                val_total = 0
+                # Validation (every ``val_every`` epochs, at every logged epoch and the last
+                # one; long-epoch cells such as synthetic-1k × 2200 ep would otherwise spend
+                # most of their time validating).
+                do_val = (
+                    config.val_every <= 1
+                    or epoch % config.val_every == 0
+                    or epoch == config.epochs
+                    or epoch in config.log_epochs
+                )
+                if do_val:
+                    model.eval()
+                    val_correct = 0
+                    val_total = 0
 
-                with torch.no_grad():
-                    for images, labels in val_loader:
-                        images = images.to(device)
-                        labels = labels.to(device)
-                        if labels.dim() > 1:
-                            labels = labels.squeeze(-1)
+                    with torch.no_grad():
+                        for images, labels in val_loader:
+                            images = images.to(device)
+                            labels = labels.to(device)
+                            if labels.dim() > 1:
+                                labels = labels.squeeze(-1)
 
-                        outputs = model(images)
-                        _, predicted = outputs.max(1)
-                        val_total += labels.size(0)
-                        val_correct += predicted.eq(labels).sum().item()
+                            outputs = model(images)
+                            _, predicted = outputs.max(1)
+                            val_total += labels.size(0)
+                            val_correct += predicted.eq(labels).sum().item()
 
-                val_accuracy = 100.0 * val_correct / val_total
-                final_accuracy = val_accuracy
+                    val_accuracy = 100.0 * val_correct / val_total
+                    final_accuracy = val_accuracy
 
-                if val_accuracy > best_val_accuracy:
-                    best_val_accuracy = val_accuracy
+                    if val_accuracy > best_val_accuracy:
+                        best_val_accuracy = val_accuracy
 
                 # Step the LR scheduler once warmup is over (epoch is 1-based).
                 if scheduler is not None and (epoch - 1) >= opt_config.warmup_epochs:
                     scheduler.step()
 
                 # Log training metrics
-                mlflow.log_metrics(
-                    {
-                        "train/loss": avg_train_loss,
-                        "train/accuracy": train_accuracy,
-                        "val/accuracy": val_accuracy,
-                        "lr": optimizer.param_groups[0]["lr"],
-                    },
-                    step=epoch,
-                )
+                epoch_metrics = {
+                    "train/loss": avg_train_loss,
+                    "train/accuracy": train_accuracy,
+                    "lr": optimizer.param_groups[0]["lr"],
+                }
+                if do_val:
+                    epoch_metrics["val/accuracy"] = val_accuracy
+                mlflow.log_metrics(epoch_metrics, step=epoch)
 
                 # Log spectral metrics at specified epochs
                 if epoch in config.log_epochs:
