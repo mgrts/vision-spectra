@@ -392,6 +392,40 @@ class TestFollowupStudy:
         )
         assert len(dl) * 30 == expected_total_steps(short) == 930
 
+    def test_optimizer_set(self) -> None:
+        from dataclasses import asdict, replace
+
+        from vision_spectra.experiments.run_spectral_analysis import (
+            build_followup_configs,
+            build_optimizer_configs,
+            build_study_set,
+            expected_total_steps,
+        )
+
+        cells = {c.name: c for c in build_optimizer_configs()}
+        base = {c.name: c for c in build_followup_configs()}
+        assert set(cells) == {"w192_path_sgd", "w192_synlong_sgd"}
+        for name, ref in (("w192_path_sgd", "w192_path"), ("w192_synlong_sgd", "w192_synlong")):
+            c = cells[name]
+            assert c.optimizer == "sgd" and c.momentum == 0.9
+            assert c.weight_decay == 0.0 and c.learning_rate == 0.05
+            assert expected_total_steps(c) == expected_total_steps(base[ref])  # step-matched
+            assert c.log_epochs == base[ref].log_epochs and c.save_checkpoint
+            assert c.embed_dim == 192 and c.depth == 6
+            # exact copy of the reference cell apart from the optimizer knobs
+            changed = {k for k, v in asdict(c).items() if v != asdict(base[ref])[k]}
+            assert changed == {
+                "scenario",
+                "description",
+                "optimizer",
+                "learning_rate",
+                "weight_decay",
+            }
+        assert all(c.optimizer == "adamw" for c in base.values())  # the recipe is unchanged
+        assert len(build_study_set("optimizer")) == 2
+        with pytest.raises(ValueError):
+            replace(cells["w192_path_sgd"], optimizer="adam")
+
     def test_study_set_dispatch(self) -> None:
         from vision_spectra.experiments.run_spectral_analysis import build_study_set
 

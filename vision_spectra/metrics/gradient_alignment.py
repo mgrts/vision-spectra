@@ -344,6 +344,8 @@ def _nan_aggregate() -> dict[str, float]:
     }
     for key in _SUBSPACE_KEYS:
         out[f"{key}_mean"] = np.nan
+    out["grad_norm_mean"] = np.nan
+    out["grad_norm_total"] = np.nan
     return out
 
 
@@ -388,6 +390,13 @@ def aggregate_gradient_alignment(
 
     for key in _SUBSPACE_KEYS:
         out[f"{key}_mean"] = _mean(valid, key)
+
+    # Magnitude of the loss gradient on the probe batch: mean per-matrix norm and the
+    # norm over all analysed matrices. Lets a trajectory show whether the gradient has
+    # vanished (fit data) while the spectrum keeps moving (AdamW normalizes it away).
+    norms = [r.training_grad_norm for r in valid if np.isfinite(r.training_grad_norm)]
+    out["grad_norm_mean"] = float(np.mean(norms)) if norms else np.nan
+    out["grad_norm_total"] = float(np.sqrt(np.sum(np.square(norms)))) if norms else np.nan
     ks = [r.k for r in valid if r.k > 0]
     out["k_mean"] = float(np.mean(ks)) if ks else np.nan
 

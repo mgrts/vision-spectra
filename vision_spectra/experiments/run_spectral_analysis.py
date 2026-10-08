@@ -157,6 +157,14 @@ class ScenarioConfig:
     study_set: str = ""  # provenance: which run-study set produced the run ("" = legacy)
     val_every: int = 1  # validate every N epochs (always at logged epochs and the last one)
     warmup_epochs: int = 5  # LR warmup length in epochs (scaled for long-epoch cells)
+    optimizer: str = "adamw"  # "adamw" (the study recipe) or "sgd" (optimizer-dependence cells)
+    momentum: float = 0.9  # SGD momentum; ignored by AdamW
+
+    def __post_init__(self) -> None:
+        if self.optimizer not in ("adamw", "sgd"):
+            raise ValueError(
+                f"ScenarioConfig.optimizer must be 'adamw' or 'sgd', got {self.optimizer!r}"
+            )
 
     @property
     def scenario_label(self) -> str:
@@ -365,7 +373,7 @@ def build_study_configs(tier: int = 1) -> list[ScenarioConfig]:
 # MedMNIST v2 official train-split sizes (used only to document step matching).
 MEDMNIST_TRAIN_SIZE = {"pathmnist": 89_996, "bloodmnist": 11_959, "dermamnist": 7_007}
 
-STUDY_SETS = ("tiers", "followup", "followup-wide")
+STUDY_SETS = ("tiers", "followup", "followup-wide", "optimizer")
 
 
 def _variant(base: ScenarioConfig, tag: str, description: str, **overrides: Any) -> ScenarioConfig:
@@ -456,6 +464,42 @@ def build_followup_configs(wide: bool = False) -> list[ScenarioConfig]:
     return cells
 
 
+def build_optimizer_configs() -> list[ScenarioConfig]:
+    """Optimizer-dependence cells (Oct-2026 plan): the two 70k-step reference cells re-run
+    with SGD + momentum instead of AdamW, same schedule shape (warm-up + cosine), same
+    snapshots, same probes.
+
+    Weight decay is 0 so that ``w192_path_sgd`` vs ``w192_path_wd0`` isolates the optimizer
+    (SGD's coupled L2 at the AdamW value 0.05 would not be comparable). LR 0.05 is the
+    common SGD(0.9) recipe for a small ViT at batch 64; the AdamW cells use 1e-4.
+    """
+    base = {c.name: c for c in build_followup_configs()}
+    cells = [
+        _variant(
+            base["w192_path"],
+            "w192_path_sgd",
+            "w192 on PathMNIST, SGD(momentum 0.9) lr 0.05, weight decay 0",
+            optimizer="sgd",
+            learning_rate=0.05,
+            momentum=0.9,
+            weight_decay=0.0,
+        ),
+        _variant(
+            base["w192_synlong"],
+            "w192_synlong_sgd",
+            "w192 on synthetic 90k × 50 ep, SGD(momentum 0.9) lr 0.05, weight decay 0",
+            optimizer="sgd",
+            learning_rate=0.05,
+            momentum=0.9,
+            weight_decay=0.0,
+        ),
+    ]
+    for c in cells:
+        c.save_checkpoint = True
+        c.log_histograms = False
+    return cells
+
+
 def build_study_set(study_set: str, tier: int = 1) -> list[ScenarioConfig]:
     """Dispatch ``run-study --set``: ``tiers`` (cumulative, via ``--tier``) or a follow-up set."""
     if study_set == "tiers":
@@ -464,6 +508,8 @@ def build_study_set(study_set: str, tier: int = 1) -> list[ScenarioConfig]:
         return build_followup_configs(wide=False)
     if study_set == "followup-wide":
         return build_followup_configs(wide=True)
+    if study_set == "optimizer":
+        return build_optimizer_configs()
     raise ValueError(f"unknown study set {study_set!r}; choose from {STUDY_SETS}")
 
 
@@ -904,6 +950,8 @@ def run_scenario_experiment(
                     "study_set": config.study_set or "legacy",
                     "val_every": config.val_every,
                     "warmup_epochs": config.warmup_epochs,
+                    "optimizer": config.optimizer,
+                    "momentum": config.momentum,
                 }
             )
 
@@ -965,9 +1013,10 @@ def run_scenario_experiment(
             # deliberately, so Δα is measured at a common endpoint across scenarios.
             criterion = torch.nn.CrossEntropyLoss()
             opt_config = OptimizerConfig(
-                name=OptimizerName.ADAMW,
+                name=OptimizerName(config.optimizer),
                 learning_rate=config.learning_rate,
                 weight_decay=config.weight_decay,
+                momentum=config.momentum,
                 scheduler=SchedulerName.COSINE,
                 warmup_epochs=config.warmup_epochs,
             )

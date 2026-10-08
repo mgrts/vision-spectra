@@ -135,6 +135,7 @@ poetry run vision-spectra spectral run-study --tier 3 --num-seeds 10 --device cu
 # weight-decay ablation and the width sweep re-run with the redefined alignment + head-drop
 # probes; saves final checkpoints; --workers runs (cell, seed) jobs in parallel processes.
 poetry run vision-spectra spectral run-study --set followup --num-seeds 10 --workers 4 --device cuda
+poetry run vision-spectra spectral run-study --set optimizer --num-seeds 5 --workers 2 --device cuda   # SGD vs AdamW (Oct-2026)
 poetry run vision-spectra spectral run-study --set followup --cells w192_synlong,w192_pathshort --seeds 42,142
 
 # Or just the original six scenarios:
@@ -385,7 +386,7 @@ For comprehensive analysis, experiments can be run across multiple model variant
 | Synthetic experiments | ✅ Complete | Scenario A fully supported |
 | Narrow network variant | ✅ Complete | `embed_dim`/`depth` params in ViT |
 | Spectral analysis pipeline | ✅ Complete | `run_spectral_analysis.py` |
-| Gradient alignment metric | ✅ Wired | `gradient_alignment.py` — logged as `alignment/*` by `run_scenario_experiment` / `spectral run-study` |
+| Gradient alignment metric | ✅ Wired | `gradient_alignment.py` — logged as `alignment/*` (incl. `alignment/grad_norm_{mean,total}`, the probe-batch gradient magnitude) by `run_scenario_experiment` / `spectral run-study` |
 | Tail-truncation experiment | ✅ Wired | `tail_truncation.py` — `bulk` (effective-rank) + `head` (heavy-tail) modes, logged as `truncation/*` by the spectral runner |
 | CCDF/log-log plots | ✅ Complete | `vision_spectra/metrics/plotting.py` |
 | Statistical comparison | ✅ Complete | `vision_spectra/metrics/statistical.py` (descriptive; underpowered at n=3) |

@@ -43,6 +43,8 @@ driven through the `vision-spectra` Typer CLI (`vision_spectra/cli.py`).
 - `vision_spectra/experiments/` — `run_spectral_analysis.py` (the headline 6-scenario study +
   the `run-study` capacity×complexity sweep; `SCENARIO_CONFIGS`, `build_study_configs`,
   `build_followup_configs` / `build_study_set` (Sept-2026 controls: `--set followup`),
+  `build_optimizer_configs` (Oct-2026 optimizer-dependence cells `w192_path_sgd`, `w192_synlong_sgd`:
+  SGD(0.9), weight decay 0, `--set optimizer`; `ScenarioConfig.optimizer` / `.momentum`),
   `create_model_for_scenario`, `run_scenario_experiment`, `record_gradient_alignment`,
   `run_truncation_analysis`, `_run_study_parallel` (`--workers N` spawned lanes)),
   `run_classification_experiments.py` (loss comparison), `run_synthetic_experiments.py`.
@@ -64,6 +66,7 @@ vision-spectra --help
 vision-spectra train-cls --dataset synthetic --epochs 2 --batch-size 8 --smoke-test
 vision-spectra spectral run-all --num-seeds 10        # the 6-scenario study (≥10 seeds)
 vision-spectra spectral run-study --set followup --num-seeds 10 --workers 4 --device cuda  # Sept-2026 controls
+vision-spectra spectral run-study --set optimizer --num-seeds 5 --workers 2 --device cuda   # Oct-2026 SGD cells
 vision-spectra figures all                            # MLflow -> figures/tables/stats
 vision-spectra experiments run --losses cross_entropy focal   # loss comparison
 ```
@@ -176,7 +179,14 @@ No Makefile. Tooling is invoked directly:
   histogram PNGs (`ScenarioConfig.log_histograms`, default off; SV JSON keeps everything).
 - **Step-count confound.** PathMNIST ≈ 70k optimizer steps vs synthetic ≈ 1k; Blood/Derma sit
   between and the Hill ordering follows steps exactly, and cosine-to-zero LR forces a plateau at
-  every run's end. `--set followup` holds the step-matched controls (`w192_synlong`,
+  every run's end. `--set optimizer` re-runs the two 70k-step reference cells with SGD+momentum
+  (weight decay 0, so `w192_path_sgd` vs `w192_path_wd0` isolates the optimizer); the probe also
+  logs `alignment/grad_norm_{mean,total}` (probe batch = first VAL batch, eval mode) so a
+  trajectory shows whether the loss gradient shrinks while the spectrum keeps moving. Measured at
+  the final checkpoints (`references/manuscript/v2/analysis/grad_at_checkpoints.py`): on the
+  synthetic 70k cells ‖∇L‖ is 3–4 orders of magnitude below init (val batch 0.0003, augmented
+  train batch 0.006) while the spikes keep growing under AdamW; on PathMNIST it stays ≈ init.
+  `--set followup` holds the step-matched controls (`w192_synlong`,
   `w192_pathshort` via `DatasetConfig.train_subsample`, TRAIN-only), the wd-ablation cells and
   the width-sweep rerun. Synthetic images are rendered once into a uint8 cache
   (`SyntheticImageDataset(cache=True)`, identical tensors) — the June run was data-path bound,
