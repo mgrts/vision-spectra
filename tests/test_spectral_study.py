@@ -426,6 +426,59 @@ class TestFollowupStudy:
         with pytest.raises(ValueError):
             replace(cells["w192_path_sgd"], optimizer="adam")
 
+    def test_updatenorm_set(self) -> None:
+        from dataclasses import asdict
+
+        from vision_spectra.experiments.run_spectral_analysis import (
+            build_followup_configs,
+            build_optimizer_configs,
+            build_study_set,
+            build_updatenorm_configs,
+            expected_total_steps,
+        )
+
+        cells = {c.name: c for c in build_updatenorm_configs()}
+        refs = {c.name: c for c in build_followup_configs()}
+        refs.update({c.name: c for c in build_optimizer_configs()})
+        assert set(cells) == {"w192_synlong_upd", "w192_synlong_sgd_upd"}
+        for name, ref in (
+            ("w192_synlong_upd", "w192_synlong"),
+            ("w192_synlong_sgd_upd", "w192_synlong_sgd"),
+        ):
+            c = cells[name]
+            assert c.log_update_norm and c.seeds == [42] and not c.run_truncation
+            assert c.optimizer == refs[ref].optimizer
+            assert c.learning_rate == refs[ref].learning_rate
+            assert expected_total_steps(c) == expected_total_steps(refs[ref])  # same schedule
+            changed = {k for k, v in asdict(c).items() if v != asdict(refs[ref])[k]}
+            assert changed == {
+                "scenario",
+                "description",
+                "seeds",
+                "log_update_norm",
+                "run_truncation",
+                "save_checkpoint",
+            }
+        assert not refs["w192_synlong"].log_update_norm  # the diagnostic is off by default
+        assert len(build_study_set("updatenorm")) == 2
+
+    def test_run_study_seed_resolution(self) -> None:
+        """``run-study`` honours a set's own seed list only when every cell pins the same
+        non-empty one; sweep / follow-up cells carry an empty list and keep the ten-seed
+        default. Explicit CLI options always win."""
+        from vision_spectra.experiments.run_spectral_analysis import (
+            _resolve_seeds,
+            build_study_set,
+        )
+
+        ten = [42 + i * 100 for i in range(10)]
+        assert _resolve_seeds(build_study_set("updatenorm"), "", None) == [42]
+        assert _resolve_seeds(build_study_set("optimizer"), "", None) == ten
+        assert _resolve_seeds(build_study_set("followup"), "", None) == ten
+        assert _resolve_seeds(build_study_set("tiers", 3), "", None) == ten  # lists disagree
+        assert _resolve_seeds(build_study_set("updatenorm"), "", 3) == ten[:3]
+        assert _resolve_seeds(build_study_set("updatenorm"), "542, 642", None) == [542, 642]
+
     def test_study_set_dispatch(self) -> None:
         from vision_spectra.experiments.run_spectral_analysis import build_study_set
 

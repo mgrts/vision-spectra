@@ -45,6 +45,9 @@ driven through the `vision-spectra` Typer CLI (`vision_spectra/cli.py`).
   `build_followup_configs` / `build_study_set` (Sept-2026 controls: `--set followup`),
   `build_optimizer_configs` (Oct-2026 optimizer-dependence cells `w192_path_sgd`, `w192_synlong_sgd`:
   SGD(0.9), weight decay 0, `--set optimizer`; `ScenarioConfig.optimizer` / `.momentum`),
+  `build_updatenorm_configs` (Oct-2026 update-norm diagnostic `w192_synlong_upd` / `w192_synlong_sgd_upd`:
+  one seed, `ScenarioConfig.log_update_norm` logs `update/{grad_norm,step_norm,cum_step_norm,lr}` every
+  `update_log_every` optimizer steps against the global step; `--set updatenorm`),
   `create_model_for_scenario`, `run_scenario_experiment`, `record_gradient_alignment`,
   `run_truncation_analysis`, `_run_study_parallel` (`--workers N` spawned lanes)),
   `run_classification_experiments.py` (loss comparison), `run_synthetic_experiments.py`.
@@ -54,7 +57,7 @@ driven through the `vision-spectra` Typer CLI (`vision_spectra/cli.py`).
 - `vision_spectra/utils/` — `reproducibility.py` (re-exports canonical seed/device +
   `count_parameters`), `checkpointing.py`, `logging.py`, `visualization.py`.
 - `tests/` — `test_data.py`, `test_losses.py`, `test_metrics.py`, `test_training.py`,
-  `test_spectral_study.py`, `test_version.py` (plain pytest, **111 tests**; get the live count with
+  `test_spectral_study.py`, `test_version.py` (plain pytest, **114 tests**; get the live count with
   `poetry run pytest --collect-only -q`).
 
 ## How to run
@@ -67,6 +70,7 @@ vision-spectra train-cls --dataset synthetic --epochs 2 --batch-size 8 --smoke-t
 vision-spectra spectral run-all --num-seeds 10        # the 6-scenario study (≥10 seeds)
 vision-spectra spectral run-study --set followup --num-seeds 10 --workers 4 --device cuda  # Sept-2026 controls
 vision-spectra spectral run-study --set optimizer --num-seeds 5 --workers 2 --device cuda   # Oct-2026 SGD cells
+vision-spectra spectral run-study --set updatenorm --workers 2 --device mps            # ‖ΔW‖ vs ‖∇L‖ per step; the set pins seed 42 (run-study takes a set's own seed list only when every cell agrees; otherwise 10 seeds, or pass --seeds)
 vision-spectra figures all                            # MLflow -> figures/tables/stats
 vision-spectra experiments run --losses cross_entropy focal   # loss comparison
 ```

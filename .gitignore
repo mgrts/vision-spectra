@@ -186,3 +186,8 @@ references/
 
 # Publication figures (legacy location - moved to references/figures)
 publication_figures/
+
+# Codex artifacts (Claude Code is the project's AI tool; these are not tracked)
+.agents/
+.codex/
+AGENTS.md

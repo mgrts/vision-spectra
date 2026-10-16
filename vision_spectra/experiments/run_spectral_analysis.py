@@ -159,6 +159,8 @@ class ScenarioConfig:
     warmup_epochs: int = 5  # LR warmup length in epochs (scaled for long-epoch cells)
     optimizer: str = "adamw"  # "adamw" (the study recipe) or "sgd" (optimizer-dependence cells)
     momentum: float = 0.9  # SGD momentum; ignored by AdamW
+    log_update_norm: bool = False  # per-step ‖∇L‖ (pre-clip) and ‖ΔW‖ over all parameters
+    update_log_every: int = 20  # log the update-norm metrics every N optimizer steps
 
     def __post_init__(self) -> None:
         if self.optimizer not in ("adamw", "sgd"):
@@ -373,7 +375,7 @@ def build_study_configs(tier: int = 1) -> list[ScenarioConfig]:
 # MedMNIST v2 official train-split sizes (used only to document step matching).
 MEDMNIST_TRAIN_SIZE = {"pathmnist": 89_996, "bloodmnist": 11_959, "dermamnist": 7_007}
 
-STUDY_SETS = ("tiers", "followup", "followup-wide", "optimizer")
+STUDY_SETS = ("tiers", "followup", "followup-wide", "optimizer", "updatenorm")
 
 
 def _variant(base: ScenarioConfig, tag: str, description: str, **overrides: Any) -> ScenarioConfig:
@@ -500,6 +502,54 @@ def build_optimizer_configs() -> list[ScenarioConfig]:
     return cells
 
 
+def build_updatenorm_configs() -> list[ScenarioConfig]:
+    """Update-norm diagnostic (Oct-2026 call): the synthetic 70k cell under AdamW and under
+    SGD, one seed each, logging ‖∇L‖ and ‖ΔW‖ at every 20th optimizer step so the applied
+    update can be compared with the gradient after the task is fit. Same schedule and
+    snapshots as the parent cells; no truncation probes, no checkpoint. ``run-study`` picks
+    the single seed and both flags up from the cells unless ``--seeds`` / ``--num-seeds`` /
+    ``--truncation`` / ``--save-checkpoints`` are passed explicitly."""
+    fu = {c.name: c for c in build_followup_configs()}
+    opt = {c.name: c for c in build_optimizer_configs()}
+    common: dict[str, Any] = {
+        "seeds": [42],
+        "log_update_norm": True,
+        "run_truncation": False,
+        "save_checkpoint": False,
+    }
+    return [
+        _variant(
+            fu["w192_synlong"],
+            "w192_synlong_upd",
+            "w192 on synthetic 90k × 50 ep, AdamW, update-norm log",
+            **common,
+        ),
+        _variant(
+            opt["w192_synlong_sgd"],
+            "w192_synlong_sgd_upd",
+            "w192 on synthetic 90k × 50 ep, SGD(0.9) lr 0.05, update-norm log",
+            **common,
+        ),
+    ]
+
+
+def _resolve_seeds(
+    configs: list[ScenarioConfig], seeds_csv: str, num_seeds: int | None
+) -> list[int]:
+    """Seed list for ``run-study``: an explicit ``--seeds`` wins, then ``--num-seeds``, then
+    the set's own list when every cell pins the same non-empty one (the updatenorm cells pin
+    seed 42), and finally the study default of ten seeds. Cells built by ``_cell`` carry an
+    empty list, so the sweep and follow-up sets keep their ten-seed default."""
+    if seeds_csv.strip():
+        return [int(x) for x in seeds_csv.split(",") if x.strip()]
+    if num_seeds is not None:
+        return [42 + i * 100 for i in range(num_seeds)]
+    own = {tuple(c.seeds) for c in configs}
+    if len(own) == 1 and next(iter(own)):
+        return list(next(iter(own)))
+    return [42 + i * 100 for i in range(10)]
+
+
 def build_study_set(study_set: str, tier: int = 1) -> list[ScenarioConfig]:
     """Dispatch ``run-study --set``: ``tiers`` (cumulative, via ``--tier``) or a follow-up set."""
     if study_set == "tiers":
@@ -510,6 +560,8 @@ def build_study_set(study_set: str, tier: int = 1) -> list[ScenarioConfig]:
         return build_followup_configs(wide=True)
     if study_set == "optimizer":
         return build_optimizer_configs()
+    if study_set == "updatenorm":
+        return build_updatenorm_configs()
     raise ValueError(f"unknown study set {study_set!r}; choose from {STUDY_SETS}")
 
 
@@ -952,6 +1004,8 @@ def run_scenario_experiment(
                     "warmup_epochs": config.warmup_epochs,
                     "optimizer": config.optimizer,
                     "momentum": config.momentum,
+                    "log_update_norm": config.log_update_norm,
+                    "update_log_every": config.update_log_every,
                 }
             )
 
@@ -1061,6 +1115,14 @@ def run_scenario_experiment(
             best_val_accuracy = 0.0
             final_accuracy = 0.0
             val_accuracy = float("nan")
+            # Update-norm diagnostic: ‖∇L‖ before clipping and ‖ΔW‖ = ‖θ_{t+1} − θ_t‖ over all
+            # trainable parameters, logged against the global optimizer step. The gradient is
+            # the augmented TRAIN batch in train mode (unlike ``alignment/grad_norm_*``, which
+            # is the fixed VAL probe batch in eval mode), and ‖ΔW‖ is the APPLIED update, so
+            # under AdamW it includes the decoupled weight-decay term lr·wd·θ.
+            params = [p for p in model.parameters() if p.requires_grad]
+            global_step = 0
+            cum_update = 0.0
 
             for epoch in range(1, config.epochs + 1):
                 # Training
@@ -1090,8 +1152,34 @@ def run_scenario_experiment(
                     if factor is not None:
                         for g, base in zip(optimizer.param_groups, base_lrs, strict=False):
                             g["lr"] = base * factor
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                    grad_total = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                    if config.log_update_norm:
+                        before = [p.detach().clone() for p in params]
                     optimizer.step()
+                    global_step += 1
+                    if config.log_update_norm:
+                        with torch.no_grad():
+                            sq = sum(
+                                ((p.detach() - b) ** 2).sum()
+                                for p, b in zip(params, before, strict=True)
+                            )
+                            step_norm = float(torch.sqrt(sq))
+                        cum_update += step_norm
+                        is_last = global_step == steps_per_epoch * config.epochs
+                        if (
+                            global_step == 1
+                            or is_last
+                            or global_step % config.update_log_every == 0
+                        ):
+                            mlflow.log_metrics(
+                                {
+                                    "update/grad_norm": float(grad_total),
+                                    "update/step_norm": step_norm,
+                                    "update/cum_step_norm": cum_update,
+                                    "update/lr": optimizer.param_groups[0]["lr"],
+                                },
+                                step=global_step,
+                            )
 
                     train_loss += loss.item()
                     _, predicted = outputs.max(1)
@@ -1671,9 +1759,14 @@ def _run_study_parallel(
 def run_study(
     tier: int = typer.Option(1, "--tier", "-t", help="1=width sweep, 2=+depth/datasets, 3=+A-F"),
     study_set: str = typer.Option(
-        "tiers", "--set", help="tiers (uses --tier) | followup | followup-wide"
+        "tiers", "--set", help=f"one of {STUDY_SETS} (tiers uses --tier)"
     ),
-    num_seeds: int = typer.Option(10, "--num-seeds", "-n", help="Seeds per cell"),
+    num_seeds: int | None = typer.Option(
+        None,
+        "--num-seeds",
+        "-n",
+        help="Seeds per cell (default: the set's own seed list if every cell pins one, else 10)",
+    ),
     seeds_csv: str = typer.Option(
         "", "--seeds", help="Explicit comma-separated seeds (overrides --num-seeds)"
     ),
@@ -1692,11 +1785,16 @@ def run_study(
     device: DeviceChoice = typer.Option(DeviceChoice.AUTO, "--device"),
     output_dir: Path = typer.Option(None, "--output", "-o"),
     alignment: bool = typer.Option(True, "--alignment/--no-alignment"),
-    truncation: bool = typer.Option(True, "--truncation/--no-truncation"),
+    truncation: bool | None = typer.Option(
+        None,
+        "--truncation/--no-truncation",
+        help="Post-train truncation probes (default: the cell's own setting; off for updatenorm)",
+    ),
     save_checkpoints: bool | None = typer.Option(
         None,
         "--save-checkpoints/--no-save-checkpoints",
-        help="Log final weights per run (default: on for follow-up sets, off for tiers)",
+        help="Log final weights per run (default: the cell's own setting; on for follow-up "
+        "and optimizer sets, off for tiers and updatenorm)",
     ),
 ) -> None:
     """Turnkey capacity × complexity study (EXPERIMENT_PLAN_V2). One command runs the
@@ -1718,13 +1816,7 @@ def run_study(
         if unknown:
             raise typer.BadParameter(f"unknown cells {sorted(unknown)} for set {study_set!r}")
         configs = [c for c in configs if c.name in wanted]
-    seeds = (
-        [int(x) for x in seeds_csv.split(",") if x.strip()]
-        if seeds_csv.strip()
-        else [42 + i * 100 for i in range(num_seeds)]
-    )
-    if save_checkpoints is None:
-        save_checkpoints = study_set != "tiers"
+    seeds = _resolve_seeds(configs, seeds_csv, num_seeds)
     workers = max(1, workers)
     # Per-lane DataLoader workers: share the machine's cores across lanes, capped at the
     # single-run default (4), never below 1. On a 32-core box with 4 lanes → 4 per lane.
@@ -1743,16 +1835,21 @@ def run_study(
         f"{len(configs) * len(seeds)}  ·  lanes: {workers}"
     )
     console.print(
-        f"  Device: {resolved_device}  ·  alignment={alignment} truncation={truncation} "
-        f"checkpoints={save_checkpoints}"
+        f"  Device: {resolved_device}  ·  alignment={alignment} "
+        f"truncation={'per cell' if truncation is None else truncation} "
+        f"checkpoints={'per cell' if save_checkpoints is None else save_checkpoints}"
     )
     console.print(f"  Output: {resolved_output}\n")
 
     for config in configs:
         config.seeds = seeds
         config.run_alignment = alignment
-        config.run_truncation = truncation
-        config.save_checkpoint = save_checkpoints
+        # ``None`` keeps the builder's choice (e.g. the updatenorm cells run no truncation
+        # probes and save no checkpoint); an explicit flag overrides every cell.
+        if truncation is not None:
+            config.run_truncation = truncation
+        if save_checkpoints is not None:
+            config.save_checkpoint = save_checkpoints
         config.study_set = study_set if study_set != "tiers" else f"tier{tier}"
         if lane_loader_workers is not None:
             config.num_workers = lane_loader_workers if resolved_device.type == "cuda" else 0

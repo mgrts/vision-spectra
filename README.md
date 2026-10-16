@@ -136,6 +136,7 @@ poetry run vision-spectra spectral run-study --tier 3 --num-seeds 10 --device cu
 # probes; saves final checkpoints; --workers runs (cell, seed) jobs in parallel processes.
 poetry run vision-spectra spectral run-study --set followup --num-seeds 10 --workers 4 --device cuda
 poetry run vision-spectra spectral run-study --set optimizer --num-seeds 5 --workers 2 --device cuda   # SGD vs AdamW (Oct-2026)
+poetry run vision-spectra spectral run-study --set updatenorm --seeds 42 --workers 2 --device mps     # per-step ‖ΔW‖ vs ‖∇L‖ record (Oct-2026)
 poetry run vision-spectra spectral run-study --set followup --cells w192_synlong,w192_pathshort --seeds 42,142
 
 # Or just the original six scenarios:
