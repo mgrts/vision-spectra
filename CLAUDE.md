@@ -42,7 +42,8 @@ driven through the `vision-spectra` Typer CLI (`vision_spectra/cli.py`).
   `synthetic.py`, `transforms.py`.
 - `vision_spectra/experiments/` — `run_spectral_analysis.py` (the headline 6-scenario study +
   the `run-study` capacity×complexity sweep; `SCENARIO_CONFIGS`, `build_study_configs`,
-  `build_followup_configs` / `build_study_set` (Sept-2026 controls: `--set followup`),
+  `build_followup_configs` / `build_study_set` (Sept-2026 controls: `--set followup`; Nov-2026 adds the
+  PathMNIST steps-only cell `w192_pathlong1k`: the `w192_pathshort` 1k subsample × 2268 epochs @ bs 32 ≈ 70.3k steps; 9 Nov: `w192_synlong_wd0`, the AdamW wd-0 comparator for `w192_synlong_sgd`, and `w192_path_m5`, identical to `w192_path` as a hardware/backend control, M5 vs L4, both fp32),
   `build_optimizer_configs` (Oct-2026 optimizer-dependence cells `w192_path_sgd`, `w192_synlong_sgd`:
   SGD(0.9), weight decay 0, `--set optimizer`; `ScenarioConfig.optimizer` / `.momentum`),
   `build_updatenorm_configs` (Oct-2026 update-norm diagnostic `w192_synlong_upd` / `w192_synlong_sgd_upd`:
@@ -57,7 +58,7 @@ driven through the `vision-spectra` Typer CLI (`vision_spectra/cli.py`).
 - `vision_spectra/utils/` — `reproducibility.py` (re-exports canonical seed/device +
   `count_parameters`), `checkpointing.py`, `logging.py`, `visualization.py`.
 - `tests/` — `test_data.py`, `test_losses.py`, `test_metrics.py`, `test_training.py`,
-  `test_spectral_study.py`, `test_version.py` (plain pytest, **114 tests**; get the live count with
+  `test_spectral_study.py`, `test_version.py` (plain pytest, **115 tests**; get the live count with
   `poetry run pytest --collect-only -q`).
 
 ## How to run

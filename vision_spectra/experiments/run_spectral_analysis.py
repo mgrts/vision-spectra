@@ -401,6 +401,9 @@ def build_followup_configs(wide: bool = False) -> list[ScenarioConfig]:
        steps: separates steps from data volume.
     2. ``w192_pathshort`` — PathMNIST with a 1k-image stratified TRAIN subsample × 30 epochs
        @ bs 32 ⇒ ≈0.9k steps, step-matched to ``w192_syn`` (val/test stay full).
+       ``w192_pathlong1k`` — the SAME 1k-image subsample × 2268 epochs @ bs 32 ⇒ ≈70k steps:
+       the PathMNIST steps-only control (Nov-2026 review: the corner that separates the step
+       count from the number of distinct images on the histology task).
     3. ``w192_path_wd0`` / ``w384_path_wd0`` — weight-decay ablation (mechanism control).
     4. The tier-1 width sweep (8 cells) re-run with the new probes; the figure readers keep
        the latest run per seed, so re-running does not double-count.
@@ -449,6 +452,26 @@ def build_followup_configs(wide: bool = False) -> list[ScenarioConfig]:
             val_every=44,  # ≈ one 50-epoch-cell epoch (1407 steps) between validations
             warmup_epochs=220,  # ≈ 5 × 1407 steps, the warmup the 50-epoch cells get
         ),
+        # Same 1k PathMNIST images as w192_pathshort, trained for the PathMNIST budget: the
+        # histology counterpart of w192_synlong1k. The BaseDataset train loader drops the last
+        # partial batch, so 1000 images @ bs 32 give 31 steps/epoch and 2268 epochs ≈ 70.3k
+        # steps; validation (full split) and warm-up are scheduled at the step counts of the
+        # 50-epoch cells (1406 steps/epoch on full PathMNIST). The subsample is drawn from the
+        # global numpy RNG right after set_seed, so it matches w192_pathshort only while nothing
+        # consumes numpy randomness before get_dataset.
+        _variant(
+            w192_path,
+            "w192_pathlong1k",
+            "w192 on PathMNIST-1k (train subsample) × 2268 ep @ bs 32 (≈70k steps: steps-only)",
+            train_subsample=1000,
+            epochs=2268,
+            batch_size=32,
+            log_epochs=_scale_log_epochs(
+                _LOG_EPOCHS_COMPLEX, from_steps_per_epoch=1406, to_steps_per_epoch=31
+            ),
+            val_every=45,  # ≈ one 50-epoch-cell epoch (1406 steps) between validations
+            warmup_epochs=227,  # ≈ 5 × 1406 steps, the warm-up the 50-epoch cells get
+        ),
         _variant(
             w192_path, "w192_path_wd0", "w192 on PathMNIST, weight decay 0", weight_decay=0.0
         ),
@@ -456,6 +479,27 @@ def build_followup_configs(wide: bool = False) -> list[ScenarioConfig]:
             w384_path, "w384_path_wd0", "w384 on PathMNIST, weight decay 0", weight_decay=0.0
         ),
     ]
+    by_name = {c.name: c for c in cells}
+    # Nov-2026 review controls. ``w192_synlong_wd0`` gives ``w192_synlong_sgd`` (weight decay 0)
+    # an AdamW comparator on the shapes, as ``w192_path_wd0`` does on PathMNIST. ``w192_path_m5``
+    # is ``w192_path`` unchanged, re-run on the Apple M5 (MPS) to measure the hardware/backend
+    # effect against the CUDA L4 runs; this runner trains in fp32 on both (the SGD cells and
+    # ``w192_pathlong1k`` ran on the M5).
+    cells.append(
+        _variant(
+            by_name["w192_synlong"],
+            "w192_synlong_wd0",
+            "w192 on synthetic 90k × 50 ep, weight decay 0 (AdamW comparator for w192_synlong_sgd)",
+            weight_decay=0.0,
+        )
+    )
+    cells.append(
+        _variant(
+            w192_path,
+            "w192_path_m5",
+            "w192 on PathMNIST, identical to w192_path: hardware/backend control (Apple M5 vs L4)",
+        )
+    )
     cells.extend(build_study_configs(1))
     if wide:
         cells.append(_cell("w768", 768, 6, _PATH))

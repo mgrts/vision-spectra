@@ -343,10 +343,23 @@ class TestFollowupStudy:
         assert le[0] == 0 and le[-1] == 2154 and 220 in le and 1319 in le  # final logged by runner
         assert cells["w192_synlong1k"].val_every == 44
         assert cells["w192_synlong1k"].warmup_epochs == 220
+        # PathMNIST steps-only control: same 1k subsample as w192_pathshort, ≈70k steps
+        long_path_1k = expected_total_steps(cells["w192_pathlong1k"])
+        assert abs(long_path_1k - path) / path < 0.01
+        assert cells["w192_pathlong1k"].train_subsample == 1000
+        assert cells["w192_pathlong1k"].dataset_name == "pathmnist"
+        assert (
+            cells["w192_pathlong1k"].batch_size == 32 and cells["w192_pathlong1k"].epochs == 2268
+        )
+        lp = cells["w192_pathlong1k"].log_epochs
+        assert lp[0] == 0 and lp[-1] == 2222 and 227 in lp and 1361 in lp
+        assert cells["w192_pathlong1k"].val_every == 45
+        assert cells["w192_pathlong1k"].warmup_epochs == 227
+        assert cells["w192_pathlong1k"].weight_decay == cells["w192_path"].weight_decay
         assert all(
             c.val_every == 1 and c.warmup_epochs == 5
             for n, c in cells.items()
-            if n != "w192_synlong1k"
+            if n not in ("w192_synlong1k", "w192_pathlong1k")
         )
         short_path = expected_total_steps(cells["w192_pathshort"])
         syn = expected_total_steps(cells["w192_syn"])
@@ -483,8 +496,8 @@ class TestFollowupStudy:
         from vision_spectra.experiments.run_spectral_analysis import build_study_set
 
         assert len(build_study_set("tiers", 1)) == 8
-        assert len(build_study_set("followup")) == 13
-        assert len(build_study_set("followup-wide")) == 15
+        assert len(build_study_set("followup")) == 16
+        assert len(build_study_set("followup-wide")) == 18
         with pytest.raises(ValueError):
             build_study_set("nope")
 
@@ -535,3 +548,25 @@ class TestSyntheticCacheAndSubsample:
         assert cfg.train_subsample == 1000
         with pytest.raises(ValidationError):
             DatasetConfig(train_subsample=0)
+
+
+def test_review_control_cells_match_their_parents() -> None:
+    """The Nov-2026 comparator cells differ from their parents only where intended."""
+    from dataclasses import replace
+
+    from vision_spectra.experiments.run_spectral_analysis import build_followup_configs
+
+    cells = {c.name: c for c in build_followup_configs()}
+    wd0, parent = cells["w192_synlong_wd0"], cells["w192_synlong"]
+    assert wd0.weight_decay == 0.0 and parent.weight_decay > 0
+    assert (
+        replace(
+            wd0,
+            scenario=parent.scenario,
+            description=parent.description,
+            weight_decay=parent.weight_decay,
+        )
+        == parent
+    )
+    m5, path = cells["w192_path_m5"], cells["w192_path"]
+    assert replace(m5, scenario=path.scenario, description=path.description) == path
